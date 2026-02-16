@@ -1,0 +1,10 @@
+[project]
+name = "pyrepl"
+version = "0.1.0"
+description = "Persistent Python REPL for LLM CLI tools"
+requires-python = ">=3.9"
+dependencies = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends._legacy:_Backend"
