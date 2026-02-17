@@ -6,5 +6,9 @@ requires-python = ">=3.9"
 dependencies = []
 
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["pyreplab"]
+script-files = ["pyreplab"]

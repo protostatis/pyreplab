@@ -15,7 +15,13 @@
 set -euo pipefail
 
 PYREPLAB_BASE="${PYREPLAB_BASE:-/tmp/pyreplab}"
-PYREPLAB_SCRIPT="${PYREPLAB_SCRIPT:-$(cd "$(dirname "$0")" && pwd)/pyreplab.py}"
+if [ -n "${PYREPLAB_SCRIPT:-}" ]; then
+    :
+elif [ -f "$(cd "$(dirname "$0")" && pwd)/pyreplab.py" ]; then
+    PYREPLAB_SCRIPT="$(cd "$(dirname "$0")" && pwd)/pyreplab.py"
+else
+    PYREPLAB_SCRIPT="$(python3 -c 'import pyreplab; print(pyreplab.__file__)')"
+fi
 
 # Resolve session dir: explicit PYREPLAB_DIR, or derived from workdir
 _resolve_dir() {
