@@ -11,22 +11,32 @@ You have access to a persistent Python REPL via `pyreplab`. Data stays in memory
 
 The `--workdir` auto-detects `.venv/` so all project packages are available. Sessions are isolated per project.
 
+## Context recovery (read this first!)
+
+If you've lost context (conversation compressed, session resumed, or you're unsure what's been run), **read the session history before doing anything else**:
+
+```bash
+cat "$(pyreplab dir)/history.md"
+```
+
+Every command and its output is logged there. Read it to understand the current state before running anything new.
+
 ## Workflow
 
 ### 1. Write a notebook
 
-Create a `.py` file with `#%%` cell blocks. Each cell is a logical step:
+Create a `.py` file with `# %%` cell blocks. Each cell is a logical step:
 
 ```python
 # analysis.py
 
-#%% Load
+# %% Load
 import pandas as pd
 df = pd.read_csv("data.csv")
 print(df.shape)
 print(df.dtypes)
 
-#%% Explore
+# %% Explore
 print(df.describe())
 ```
 
@@ -35,6 +45,8 @@ print(df.describe())
 ```bash
 pyreplab run analysis.py:0
 ```
+
+On first run, pyreplab stamps `[N]` indices into the cell markers in the file (`# %% Load` → `# %% [0] Load`). This is idempotent — subsequent runs don't double-stamp. Disable with `PYREPLAB_STAMP=0`.
 
 **Read the output. Think about what it tells you. Then decide what cell to run next.**
 
@@ -59,13 +71,20 @@ pyreplab run 'print(df.columns.tolist())'
 
 ```
 pyreplab start --workdir DIR    Start session (auto-detects .venv/)
-pyreplab run file.py:N          Run cell N from file
-pyreplab run file.py            Run all cells
+pyreplab start --workdir DIR --cwd DIR   Start with separate working directory
+pyreplab run file.py:N          Run cell N (stamps [N] indices into file)
+pyreplab run file.py            Run all cells (stamps [N] indices into file)
 pyreplab run 'code'             Run inline code
+pyreplab cells file.py          List cells (stamps [N], peeks comments for labels)
+pyreplab wait                   Wait for a long-running command to finish
+pyreplab dir                    Print session directory path
+pyreplab status                 Check if REPL is running (idle/executing)
 pyreplab ps                     Show active sessions
 pyreplab stop                   Stop current session
 pyreplab stop-all               Stop all sessions
 ```
+
+Long-running commands return early with exit code 2 and a "still running" message. Use `pyreplab wait` to resume polling. If you get "busy running previous command", run `pyreplab wait` first before submitting new code.
 
 ## Rules
 
@@ -75,4 +94,4 @@ pyreplab stop-all               Stop all sessions
 4. **Errors don't kill the session.** If a cell errors, fix it and re-run. The namespace survives.
 5. **Start with shape and dtypes.** Always inspect the data before analyzing it.
 6. **End with a conclusion.** Your final cell should print a clear, specific finding — not just tables.
-7. **Context recovery.** Every execution is logged to `history.md` in the session directory. If you lose context (conversation compressed, session resumed), read that file to see what was already run and what's in the namespace.
+7. **Context recovery.** If you lose context, read `history.md` from the session directory (see "Context recovery" section above).

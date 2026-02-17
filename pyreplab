@@ -2,13 +2,17 @@
 # pyreplab — CLI for the persistent Python REPL
 #
 # Usage:
-#   pyreplab start [--workdir DIR] [--venv PATH] [...]
-#   pyreplab run notebook.py       Run all cells
+#   pyreplab start [--workdir DIR] [--cwd DIR] [--venv PATH] [...]
+#   pyreplab run notebook.py       Run all cells (stamps [N] into # %% markers)
 #   pyreplab run notebook.py:2     Run cell 2
 #   pyreplab run 'print("hello")'  Inline code
 #   pyreplab run < script.py       Read from stdin
-#   pyreplab stop
-#   pyreplab clean
+#   pyreplab cells notebook.py     List cells (stamps [N], peeks comments)
+#   pyreplab wait                  Wait for a running command to finish
+#   pyreplab status                Check if REPL is running
+#   pyreplab ps                    List all active sessions
+#   pyreplab stop / stop-all       Stop session(s)
+#   pyreplab clean                 Remove session files
 #
 # No sourcing needed. Each invocation is standalone.
 
@@ -107,10 +111,60 @@ cmd_stop() {
 cmd_clean() {
     local dir
     dir=$(_resolve_dir)
-    for f in cmd.py cmd.py.tmp output.json output.json.tmp done; do
+    for f in cmd.py cmd.py.tmp output.json output.json.tmp done pending_id; do
         [ -f "$dir/$f" ] && rm -f "$dir/$f"
     done
     echo "pyreplab: cleaned session files in $dir" >&2
+}
+
+_count_cells() {
+    # Count the number of cells in a .py file.
+    local file="$1"
+    python3 -c '
+import sys, re
+text = open(sys.argv[1]).read()
+markers = list(re.finditer(r"(?m)^# ?%%[^\n]*\n", text))
+if not markers:
+    print(1)
+elif re.match(r"# ?%%", text):
+    print(len(markers))
+else:
+    print(len(markers) + 1)
+' "$file"
+}
+
+_stamp_cells() {
+    # Add or update [N] indices on cell markers in a .py file. Idempotent.
+    local file="$1"
+    python3 -c '
+import sys, re
+
+path = sys.argv[1]
+text = open(path).read()
+lines = text.split("\n")
+
+# If file starts with a cell marker, first marker is cell 0.
+# Otherwise preamble is cell 0, first marker is cell 1.
+has_preamble = not re.match(r"# ?%%", text)
+cell_idx = 1 if has_preamble else 0
+changed = False
+
+for i, line in enumerate(lines):
+    m = re.match(r"^(# ?%%)\s*(?:\[(\d+)\]\s*)?(.*?)$", line)
+    if m:
+        prefix, existing_idx, label = m.groups()
+        new_line = f"# %% [{cell_idx}]"
+        if label.strip():
+            new_line += f" {label.strip()}"
+        if lines[i] != new_line:
+            lines[i] = new_line
+            changed = True
+        cell_idx += 1
+
+if changed:
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+' "$file"
 }
 
 _extract_cell() {
@@ -129,19 +183,19 @@ _extract_cell() {
 import sys, re
 
 text = open(sys.argv[1]).read()
-# Split on #%% lines, keeping the delimiter info
-parts = re.split(r"(?m)^#%%[^\n]*\n", text)
+# Split on # %% or #%% lines (accept optional space per industry convention)
+parts = re.split(r"(?m)^# ?%%[^\n]*\n", text)
 
-# If file starts with #%%, first split is empty string before it
-# If file does NOT start with #%%, first split is the preamble (cell 0)
+# If file starts with a cell marker, first split is empty string before it
+# If file does NOT start with one, first split is the preamble (cell 0)
 cells = []
-markers = list(re.finditer(r"(?m)^#%%[^\n]*\n", text))
+markers = list(re.finditer(r"(?m)^# ?%%[^\n]*\n", text))
 
-if text.startswith("#%%"):
+if re.match(r"# ?%%", text):
     # Each marker corresponds to a cell
     cells = parts[1:]  # skip empty first split
 else:
-    # parts[0] is preamble before first #%%, rest follow markers
+    # parts[0] is preamble before first marker, rest follow markers
     cells = parts
 
 idx = int(sys.argv[2])
@@ -152,27 +206,15 @@ print(cells[idx], end="")
 ' "$file" "$cell_idx"
 }
 
-_send_code() {
-    # Send code to the pyreplab server and print the response.
-    local code="$1"
-    local cell_label="${2:-}"
+_wait_for_result() {
+    # Poll for command completion and print output.
+    # Returns 0 on success, 1 on error output, 2 on timeout (still running).
+    local timeout="${1:-115}"
     local dir
     dir=$(_resolve_dir)
-    local id
-    id="cmd_$$_$(date +%s%N 2>/dev/null || echo $RANDOM)"
-    local cmd_path="$dir/cmd.py"
     local done_path="$dir/done"
     local output_path="$dir/output.json"
-    local timeout="${PYREPLAB_TIMEOUT:-30}"
-
-    # Remove stale handshake files
-    rm -f "$done_path" "$output_path"
-
-    # Write cmd.py with #%% cell header (atomic: write tmp, then move)
-    local header="id: $id"
-    [ -n "$cell_label" ] && header="$header cell: $cell_label"
-    printf '#%%%% %s\n%s\n' "$header" "$code" > "$cmd_path.tmp"
-    mv "$cmd_path.tmp" "$cmd_path"
+    local pending_path="$dir/pending_id"
 
     # Poll for completion
     local elapsed=0
@@ -180,8 +222,8 @@ _send_code() {
         sleep 0.1
         elapsed=$((elapsed + 1))
         if [ "$elapsed" -ge "$((timeout * 10))" ]; then
-            echo "pyreplab: timed out waiting for response" >&2
-            return 1
+            echo "pyreplab: still running (${timeout}s elapsed). Run \`pyreplab wait\` to check again." >&2
+            return 2
         fi
     done
 
@@ -193,9 +235,11 @@ _send_code() {
     result=$(cat "$output_path" 2>/dev/null) || true
     if [ -z "$result" ]; then
         echo "pyreplab: no output received" >&2
+        rm -f "$pending_path"
         return 1
     fi
     rm -f "$output_path"
+    rm -f "$pending_path"
 
     # Parse JSON and print (single python3 call)
     printf '%s' "$result" | python3 -c '
@@ -214,22 +258,61 @@ if error:
 '
 }
 
+_send_code() {
+    # Send code to the pyreplab server and print the response.
+    local code="$1"
+    local cell_label="${2:-}"
+    local dir
+    dir=$(_resolve_dir)
+    local id
+    id="cmd_$$_$(date +%s%N 2>/dev/null || echo $RANDOM)"
+    local cmd_path="$dir/cmd.py"
+    local done_path="$dir/done"
+    local output_path="$dir/output.json"
+    local pending_path="$dir/pending_id"
+    local timeout="${PYREPLAB_TIMEOUT:-115}"
+
+    # Check if server is busy with a previous command
+    if [ -f "$pending_path" ]; then
+        echo "pyreplab: busy running previous command. Run \`pyreplab wait\` first." >&2
+        return 1
+    fi
+
+    # Remove stale handshake files
+    rm -f "$done_path" "$output_path"
+
+    # Write cmd.py with #%% cell header (atomic: write tmp, then move)
+    local header="id: $id"
+    [ -n "$cell_label" ] && header="$header cell: $cell_label"
+    printf '#%%%% %s\n%s\n' "$header" "$code" > "$cmd_path.tmp"
+    mv "$cmd_path.tmp" "$cmd_path"
+
+    # Track pending command
+    printf '%s' "$id" > "$pending_path"
+
+    # Wait for result
+    _wait_for_result "$timeout"
+}
+
 cmd_cells() {
     local file="${1:-}"
     if [ -z "$file" ] || ! [ -f "$file" ]; then
         echo "Usage: pyreplab cells <file.py>" >&2
         return 1
     fi
+    local stamp="${PYREPLAB_STAMP:-1}"
+    [ "$stamp" = "1" ] && _stamp_cells "$file"
     python3 -c '
 import sys, re
 text = open(sys.argv[1]).read()
-markers = list(re.finditer(r"(?m)^#%%[^\n]*$", text))
+lines = text.split("\n")
+markers = list(re.finditer(r"(?m)^# ?%%[^\n]*$", text))
 if not markers:
-    # No #%% markers — whole file is cell 0
-    first = text.split("\n")[0].strip()
+    # No cell markers — whole file is cell 0
+    first = lines[0].strip() if lines else "(empty)"
     print(f"  0: {first}")
     sys.exit(0)
-# If file starts with content before first #%%, that is cell 0 (preamble)
+# If file starts with content before first marker, that is cell 0 (preamble)
 if markers[0].start() > 0:
     pre = text[:markers[0].start()].strip().split("\n")
     first = next((l.strip() for l in pre if l.strip()), "(empty)")
@@ -238,43 +321,92 @@ if markers[0].start() > 0:
 else:
     offset = 0
 for i, m in enumerate(markers):
-    label = m.group().lstrip("#% ").strip() or "(unnamed)"
-    print(f"  {i + offset}: #%% {label}")
+    # Strip the marker prefix to get the inline label
+    label = re.sub(r"^# ?%%\s*(?:\[\d+\]\s*)?", "", m.group()).strip()
+    # If no inline label, peek at the next line for a comment
+    if not label:
+        end = m.end()
+        line_start = text.find("\n", end)
+        if line_start == -1:
+            next_line = ""
+        else:
+            # The next line starts right after the marker line
+            next_start = end + 1 if end < len(text) and text[end] == "\n" else end
+            next_end = text.find("\n", next_start)
+            next_line = text[next_start:next_end].strip() if next_end != -1 else text[next_start:].strip()
+        if next_line.startswith("#") and not re.match(r"# ?%%", next_line):
+            label = next_line.lstrip("# ").strip()
+    label = label or "(unnamed)"
+    print(f"  {i + offset}: # %% {label}")
 ' "$file"
 }
 
 cmd_run() {
     # Resolve session from cwd (unless PYREPLAB_DIR is set)
     [ -z "${PYREPLAB_DIR:-}" ] && _parse_workdir
-    local code=""
     local arg="${1:-}"
-
-    local cell_label=""
+    local stamp="${PYREPLAB_STAMP:-1}"
 
     if [ -z "$arg" ]; then
         # No args: read from stdin
+        local code
         code=$(cat)
+        if [ -z "$code" ]; then
+            echo "pyreplab: no code to run" >&2
+            return 1
+        fi
+        _send_code "$code" ""
     elif [ -f "$arg" ]; then
-        # pyreplab run file.py — run whole file
-        code=$(_extract_cell "$arg" all)
-        cell_label="$(basename "$arg")"
+        # pyreplab run file.py — stamp cells, then run each individually
+        [ "$stamp" = "1" ] && _stamp_cells "$arg"
+        local base
+        base="$(basename "$arg")"
+        local cell_count
+        cell_count=$(_count_cells "$arg")
+        local i
+        for ((i=0; i<cell_count; i++)); do
+            local code
+            code=$(_extract_cell "$arg" "$i")
+            if [ -z "$code" ]; then
+                continue
+            fi
+            _send_code "$code" "$base:$i" || return $?
+        done
     elif [[ "$arg" == *:* ]] && [ -f "${arg%%:*}" ]; then
-        # pyreplab run file.py:N — run cell N (only if file exists)
+        # pyreplab run file.py:N — stamp cells, then run cell N
         local file="${arg%%:*}"
         local cell="${arg##*:}"
+        [ "$stamp" = "1" ] && _stamp_cells "$file"
+        local code
         code=$(_extract_cell "$file" "$cell")
-        cell_label="$(basename "$file"):$cell"
+        if [ -z "$code" ]; then
+            echo "pyreplab: no code to run" >&2
+            return 1
+        fi
+        _send_code "$code" "$(basename "$file"):$cell"
     else
         # Inline code
-        code="$arg"
+        _send_code "$arg" ""
     fi
+}
 
-    if [ -z "$code" ]; then
-        echo "pyreplab: no code to run" >&2
+cmd_wait() {
+    local dir
+    dir=$(_resolve_dir)
+    local timeout="${PYREPLAB_TIMEOUT:-115}"
+
+    if [ ! -f "$dir/pending_id" ]; then
+        echo "pyreplab: no command pending" >&2
         return 1
     fi
 
-    _send_code "$code" "$cell_label"
+    _wait_for_result "$timeout"
+}
+
+cmd_dir() {
+    local dir
+    dir=$(_resolve_dir)
+    echo "$dir"
 }
 
 cmd_status() {
@@ -282,7 +414,9 @@ cmd_status() {
     dir=$(_resolve_dir)
     local pidfile="$dir/pyreplab.pid"
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-        echo "pyreplab: running (pid $(cat "$pidfile"), dir $dir)"
+        local state="idle"
+        [ -f "$dir/pending_id" ] && state="executing command"
+        echo "pyreplab: running (pid $(cat "$pidfile"), dir $dir), $state"
     else
         echo "pyreplab: not running"
         return 1
@@ -376,26 +510,32 @@ case "${1:-help}" in
     stop-all) cmd_stop_all ;;
     clean)  shift; _parse_workdir "$@"; cmd_clean ;;
     run)    shift; cmd_run "$@" ;;
+    wait)   shift; _parse_workdir "$@"; cmd_wait ;;
     cells)  shift; cmd_cells "$@" ;;
+    dir)    shift; _parse_workdir "$@"; cmd_dir ;;
     status) shift; _parse_workdir "$@"; cmd_status ;;
     ps|list|ls) cmd_ps ;;
     help|--help|-h)
         echo "Usage: pyreplab <command> [args]"
         echo ""
         echo "Commands:"
-        echo "  start [opts]        Start the REPL (opts passed to pyreplab.py)"
-        echo "  run file.py         Run all #%% cells in file"
+        echo "  start [opts]        Start the REPL (opts: --workdir, --cwd, --venv, ...)"
+        echo "  run file.py         Run all cells (stamps [N] indices into file)"
         echo "  run file.py:N       Run cell N from file (0-indexed)"
         echo "  run 'code'          Run inline code"
         echo "  run                 Read code from stdin"
-        echo "  cells file.py       List cell indices and summaries"
+        echo "  cells file.py       List cells (stamps [N] indices into file)"
+        echo "  wait                Wait for a running command to finish"
         echo "  stop                Stop the current session"
         echo "  stop-all            Stop all active sessions"
+        echo "  dir                 Print session directory path"
         echo "  status              Check if REPL is running"
         echo "  ps                  List all active sessions"
         echo "  clean               Remove session files"
         echo ""
-        echo "Sessions are isolated per --workdir. Set PYREPLAB_DIR to override."
+        echo ""
+        echo "Cell stamping adds [N] indices to # %% markers in your .py files."
+        echo "Set PYREPLAB_STAMP=0 to disable. Accepts both # %% and #%% markers."
         ;;
     *)
         echo "pyreplab: unknown command '$1' (try 'pyreplab help')" >&2

@@ -33,11 +33,20 @@ Or write a .py file with #%% cells and run by index:
 2. Run ONLY cell 0
 3. Report what you found and wait for further instructions
 
+## Context recovery
+
+If you lose context (conversation compressed), read the session history first:
+```bash
+cat "$({PYREPLAB_PATH} dir)/history.md"
+```
+This shows every command that was executed and its output — tells you what's loaded in the namespace.
+
 ## Rules
 - Run ONE cell at a time. Read output. Think. Then wait for the user.
 - Data persists between cells — no reloading needed.
 - Always print() results — the REPL only captures stdout.
 - If something errors, the session survives. Fix and re-run.
+- If you lose context, run `cat "$({PYREPLAB_PATH} dir)/history.md"` before doing anything else.
 ```
 
 ---

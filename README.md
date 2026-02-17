@@ -6,24 +6,24 @@ LLM coding CLIs (Claude Code, Copilot CLI, etc.) can't maintain a persistent Pyt
 
 ## How it works
 
-A background Python process sits in memory with a persistent namespace. You write `.py` files with `#%%` cell blocks, then execute cells by reference. No ports, no sockets, no dependencies.
+A background Python process sits in memory with a persistent namespace. You write `.py` files with `# %%` cell blocks, then execute cells by reference. No ports, no sockets, no dependencies.
 
 ## Quick start
 
-Write a `.py` file with `#%%` cell blocks — in your editor, or let an LLM write it:
+Write a `.py` file with `# %%` cell blocks — in your editor, or let an LLM write it:
 
 ```python
 # analysis.py
 
-#%% Load
+# %% Load
 import pandas as pd
 df = pd.read_csv("data.csv")
 print(df.shape)
 
-#%% Explore
+# %% Explore
 print(df.describe())
 
-#%% Top rows
+# %% Top rows
 print(df.head(20))
 ```
 
@@ -31,10 +31,17 @@ Then run cells:
 
 ```bash
 pyreplab start --workdir /path/to/project   # start (auto-detects .venv/)
-pyreplab run analysis.py:0                  # Load data
+pyreplab run analysis.py:0                  # Load data — stamps [0], [1], [2] into file
 pyreplab run analysis.py:1                  # Explore (df still loaded)
 pyreplab run analysis.py:2                  # Top rows (no reload)
 pyreplab stop
+```
+
+After the first run, `analysis.py` is updated with cell indices:
+```python
+# %% [0] Load        ← index added automatically
+# %% [1] Explore
+# %% [2] Top rows
 ```
 
 ## CLI reference
@@ -42,15 +49,18 @@ pyreplab stop
 ```
 pyreplab <command> [args]
 
-  start [opts]        Start the REPL (opts passed to pyreplab.py)
-  run file.py         Run all #%% cells in file
+  start [opts]        Start the REPL (opts: --workdir, --cwd, --venv, ...)
+  run file.py         Run all cells (stamps [N] indices into file)
   run file.py:N       Run cell N from file (0-indexed)
   run 'code'          Run inline code
   run                 Read code from stdin
+  cells file.py       List cells (stamps [N] indices into file)
+  wait                Wait for a running command to finish
+  dir                 Print session directory path
   stop                Stop the current session
   stop-all            Stop all active sessions
   ps                  List all active sessions with PID, uptime, memory
-  status              Check if REPL is running
+  status              Check if REPL is running (shows idle/executing)
   clean               Remove session files
 ```
 
@@ -60,7 +70,8 @@ pyreplab <command> [args]
 python pyreplab.py [options]
 
   --session-dir DIR    Session directory (default: /tmp/pyreplab)
-  --workdir DIR        Working directory for the REPL
+  --workdir DIR        Project root for session identity and .venv detection
+  --cwd DIR            Working directory for the REPL (defaults to --workdir)
   --venv PATH          Path to virtualenv (auto-detects .venv/ in workdir)
   --conda [ENV]        Activate conda env (default: base)
   --no-conda           Disable conda auto-detection
@@ -70,6 +81,42 @@ python pyreplab.py [options]
   --max-cols N         Pandas display columns (default: 20)
   --poll-interval SECS Poll interval (default: 0.05)
 ```
+
+## Working directory
+
+By default, `--workdir` sets both the session identity (for .venv detection and session isolation) and the REPL's working directory. Use `--cwd` to override the REPL's working directory separately:
+
+```bash
+# .venv detected from project root, but REPL runs in data subdir
+pyreplab start --workdir /project --cwd /project/data/experiment1
+pyreplab run 'import pandas as pd; print(pd.read_csv("local_file.csv").shape)'
+```
+
+This is useful for data analysts who want to move between folders while keeping the same session and environment.
+
+## Async execution
+
+Long-running commands return early instead of blocking. The client polls for up to `PYREPLAB_TIMEOUT` seconds (default: 115s, just under the typical 2-minute Bash tool timeout). If the command finishes in time, output is returned normally. If not:
+
+```bash
+export PYREPLAB_TIMEOUT=5
+pyreplab run 'import time; time.sleep(30); print("done")'
+# → pyreplab: still running (5s elapsed). Run `pyreplab wait` to check again.
+# exit code 2
+
+pyreplab wait
+# → done
+# exit code 0
+```
+
+If you try to run a new command while one is still executing:
+```bash
+pyreplab run 'print("hi")'
+# → pyreplab: busy running previous command. Run `pyreplab wait` first.
+# exit code 1
+```
+
+Short commands that finish within the timeout window work identically to before — no behavior change.
 
 ## Environment detection
 
@@ -155,17 +202,55 @@ Output is automatically truncated for LLM-friendly sizes:
 
 Override with `--max-rows` and `--max-cols`. The `--max-output` flag is a hard character cap that truncates at line boundaries, keeping both head and tail.
 
+## Cell markers and stamping
+
+Cells are delimited by `# %%` comments (the [percent format](https://jupytext.readthedocs.io/en/latest/formats-scripts.html), compatible with VS Code, Spyder, PyCharm, and Jupytext). Both `# %%` and `#%%` are accepted.
+
+When you run or list cells, pyreplab **stamps `[N]` indices** into the cell markers in your file:
+
+```python
+# Before:                       # After first run/cells:
+# %% Load                       # %% [0] Load
+import pandas as pd              import pandas as pd
+# %%                             # %% [1]
+# Clean the data                 # Clean the data
+df = df.dropna()                 df = df.dropna()
+```
+
+- **Idempotent** — running again doesn't double-stamp; indices update if cells are reordered
+- **`#%%` normalizes to `# %%`** — the PEP 8 / linter-friendly form (avoids flake8 E265)
+- **`PYREPLAB_STAMP=0`** — disables file modification entirely
+- **Inline code and stdin** — no stamping (no file to modify)
+
+The `cells` command also reads the first comment line below an unlabeled `# %%` marker as its description:
+
+```
+$ pyreplab cells analysis.py
+  0: # %% Load
+  1: # %% Clean the data       ← peeked from comment below "# %% [1]"
+```
+
+## Session history
+
+Every execution is logged to `history.md` in the session directory. This is useful for context recovery — if an LLM conversation gets compressed or a session is resumed, the agent can read the history to see what was already run and what's in the namespace.
+
+```bash
+cat "$(pyreplab dir)/history.md"
+```
+
+The history resets on each new session start.
+
 ## Protocol
 
 **cmd.py** (client writes):
 ```python
-#%% id: unique-id
+# %% id: unique-id
 import pandas as pd
 df = pd.read_csv("big.csv")
 print(df.shape)
 ```
 
-The first line is a `#%%` cell header with an optional command ID. The rest is plain Python — no escaping, no JSON encoding.
+The first line is a `# %%` cell header with a command ID. The rest is plain Python — no escaping, no JSON encoding.
 
 **output.json** (pyreplab writes):
 ```json

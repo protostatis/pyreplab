@@ -97,11 +97,11 @@ def _timeout_handler(signum, frame):
 
 
 def parse_cmd_file(text):
-    """Parse a cmd.py file. First line is '#%% id: xxx cell: label', rest is code."""
+    """Parse a cmd.py file. First line is '# %% id: xxx cell: label', rest is code."""
     lines = text.split("\n")
     cmd_id = ""
     cell_label = ""
-    if lines and lines[0].startswith("#%%"):
+    if lines and (lines[0].startswith("#%%") or lines[0].startswith("# %%")):
         header = lines[0]
         if "id:" in header:
             id_part = header.split("id:", 1)[1]
@@ -236,7 +236,8 @@ def cleanup(session_dir):
 def main():
     parser = argparse.ArgumentParser(description="Persistent Python REPL for LLM CLI tools")
     parser.add_argument("--session-dir", default="/tmp/pyreplab", help="Session directory (default: /tmp/pyreplab)")
-    parser.add_argument("--workdir", default=None, help="Working directory for the REPL")
+    parser.add_argument("--workdir", default=None, help="Project root for session identity and .venv detection")
+    parser.add_argument("--cwd", default=None, help="Working directory for the REPL (defaults to --workdir)")
     parser.add_argument("--venv", default=None, help="Path to virtualenv to activate (auto-detects .venv/ in workdir)")
     parser.add_argument("--conda", default=None, nargs="?", const="base",
                         help="Activate conda env (default: base). Use --conda for base, --conda envname for a named env")
@@ -251,13 +252,13 @@ def main():
     session_dir = args.session_dir
     os.makedirs(session_dir, exist_ok=True)
 
-    if args.workdir:
-        os.chdir(args.workdir)
+    # Detect .venv from --workdir (project root), not --cwd
+    venv_detect_dir = os.path.abspath(args.workdir) if args.workdir else os.getcwd()
 
-    # Activate environment: explicit --venv, auto-detect .venv/, or fallback to conda base
+    # Activate environment: explicit --venv, auto-detect .venv/ in workdir, or fallback to conda base
     venv_path = args.venv
     if venv_path is None:
-        candidate = os.path.join(os.getcwd(), ".venv")
+        candidate = os.path.join(venv_detect_dir, ".venv")
         if os.path.isdir(candidate):
             venv_path = candidate
     if venv_path:
@@ -281,6 +282,11 @@ def main():
         conda_base = find_conda_base()
         if conda_base:
             activate_venv(conda_base)
+
+    # Set working directory: --cwd overrides --workdir
+    final_cwd = args.cwd or args.workdir
+    if final_cwd:
+        os.chdir(final_cwd)
 
     # Clean any stale files from a previous run
     cleanup(session_dir)
