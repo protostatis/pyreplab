@@ -208,7 +208,7 @@ def append_history(session_dir, index, code, stdout, stderr, error):
     history_path = os.path.join(session_dir, "history.md")
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    with open(history_path, "a") as f:
+    with open(history_path, "w" if index == 0 else "a") as f:
         if index == 0:
             f.write(f"# pyreplab session history\n\n")
 
