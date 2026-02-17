@@ -6,67 +6,216 @@ LLM coding CLIs (Claude Code, Copilot CLI, etc.) can't maintain a persistent Pyt
 
 ## How it works
 
-A background Python process sits in memory with a persistent namespace. It communicates via JSON files in a session directory:
-
-1. Client writes `cmd.json` with `{"code": "...", "id": "123"}`
-2. pyrepl executes the code, writes `output.json` with `{"stdout": "...", "stderr": "...", "error": null, "id": "123"}`
-3. pyrepl writes a `done` flag file to signal completion
-
-No ports, no sockets, no dependencies. Any tool that can write and read files can drive it.
+A background Python process sits in memory with a persistent namespace. You write `.py` files with `#%%` cell blocks, then execute cells by reference. No ports, no sockets, no dependencies.
 
 ## Quick start
 
-```bash
-# Start the background process
-python pyrepl.py &
+Write a `.py` file with `#%%` cell blocks — in your editor, or let an LLM write it:
 
-# Send commands via the shell helper
-source pyrepl.sh
-pyrun 'import pandas as pd; df = pd.read_csv("big.csv"); print(df.shape)'
-pyrun 'print(df.describe())'   # df is still loaded — no reload
+```python
+# analysis.py
+
+#%% Load
+import pandas as pd
+df = pd.read_csv("data.csv")
+print(df.shape)
+
+#%% Explore
+print(df.describe())
+
+#%% Top rows
+print(df.head(20))
 ```
 
-## Options
+Then run cells:
+
+```bash
+pyrepl start --workdir /path/to/project   # start (auto-detects .venv/)
+pyrepl run analysis.py:0                  # Load data
+pyrepl run analysis.py:1                  # Explore (df still loaded)
+pyrepl run analysis.py:2                  # Top rows (no reload)
+pyrepl stop
+```
+
+## CLI reference
+
+```
+pyrepl <command> [args]
+
+  start [opts]        Start the REPL (opts passed to pyrepl.py)
+  run file.py         Run all #%% cells in file
+  run file.py:N       Run cell N from file (0-indexed)
+  run 'code'          Run inline code
+  run                 Read code from stdin
+  stop                Stop the current session
+  stop-all            Stop all active sessions
+  ps                  List all active sessions with PID, uptime, memory
+  status              Check if REPL is running
+  clean               Remove session files
+```
+
+## Server options
 
 ```
 python pyrepl.py [options]
 
   --session-dir DIR    Session directory (default: /tmp/pyrepl)
   --workdir DIR        Working directory for the REPL
+  --venv PATH          Path to virtualenv (auto-detects .venv/ in workdir)
+  --conda [ENV]        Activate conda env (default: base)
+  --no-conda           Disable conda auto-detection
   --timeout SECS       Per-command timeout (default: 30)
-  --max-output CHARS   Max output size (default: 100000)
+  --max-output CHARS   Hard cap on output size (default: 100000)
+  --max-rows N         Pandas display rows (default: 50)
+  --max-cols N         Pandas display columns (default: 20)
   --poll-interval SECS Poll interval (default: 0.05)
 ```
 
-## Shell helper
+## Environment detection
 
-Source `pyrepl.sh` to get the `pyrun` function:
+pyrepl automatically detects and activates Python environments so your project packages are available. Detection follows a priority order — the first match wins:
+
+| Priority | Source | How it's found |
+|----------|--------|----------------|
+| 1 | `--venv PATH` | Explicit flag |
+| 2 | `.venv/` in workdir | Auto-detected |
+| 3 | `--conda [ENV]` | Explicit flag |
+| 4 | Conda base | Auto-detected fallback |
+
+If a project has a `.venv/`, that always takes precedence over conda. If no `.venv/` exists, pyrepl falls back to conda's base environment (giving you numpy, pandas, scipy, etc. out of the box). Use `--no-conda` to disable the fallback.
+
+### Virtual environments (venv, uv, virtualenv)
 
 ```bash
-source pyrepl.sh
-pyrun 'print("hello")'
+# Auto-detect .venv/ in workdir (most common)
+pyrepl start --workdir /path/to/project
+
+# Explicit path to any virtualenv
+pyrepl start --venv /path/to/.venv
 ```
 
-Set `PYREPL_DIR` to use a custom session directory:
+Works with `uv venv`, `python -m venv`, or any standard virtualenv.
+
+### Conda environments
 
 ```bash
-PYREPL_DIR=/tmp/myrepl source pyrepl.sh
-pyrun 'print("hello")'
+# Auto-detect: if no .venv/, conda base is used automatically
+pyrepl start --workdir /path/to/project
+
+# Explicit: force conda base
+pyrepl start --conda
+
+# Named conda env
+pyrepl start --conda myenv
+
+# Disable conda fallback (bare Python only)
+pyrepl start --no-conda
 ```
+
+Conda base is found by checking, in order:
+1. `$CONDA_PREFIX` (set when a conda env is active)
+2. `$CONDA_EXE` (e.g. `~/miniconda3/bin/conda` → derives `~/miniconda3`)
+3. Common install paths: `~/miniconda3`, `~/anaconda3`, `~/miniforge3`, `~/mambaforge`, `/opt/conda`
+
+Named envs resolve to `<conda_base>/envs/<name>`.
+
+## Session isolation
+
+Each `--workdir` gets its own isolated session — separate process, namespace, and files. No clashing between projects.
+
+```bash
+# Two projects, two sessions
+pyrepl start --workdir ~/projects/project-a
+pyrepl start --workdir ~/projects/project-b
+
+# See what's running
+pyrepl ps
+# SESSION                      PID     UPTIME   MEM    DIR
+# project-a_a1b2c3d4           12345   5m30s    57MB   /tmp/pyrepl/project-a_a1b2c3d4
+# project-b_e5f6g7h8           12346   2m15s    43MB   /tmp/pyrepl/project-b_e5f6g7h8
+
+# Commands auto-resolve to the right session based on cwd
+cd ~/projects/project-a && pyrepl run analysis.py:0
+cd ~/projects/project-b && pyrepl run analysis.py:0
+
+# Stop everything
+pyrepl stop-all
+```
+
+## Display limits
+
+Output is automatically truncated for LLM-friendly sizes:
+
+| Library | Setting | Default |
+|---------|---------|---------|
+| pandas | max_rows | 50 |
+| pandas | max_columns | 20 |
+| pandas | max_colwidth | 80 chars |
+| numpy | threshold | 100 elements |
+
+Override with `--max-rows` and `--max-cols`. The `--max-output` flag is a hard character cap that truncates at line boundaries, keeping both head and tail.
 
 ## Protocol
 
-**cmd.json** (client writes):
-```json
-{"code": "print('hello')", "id": "unique-id"}
+**cmd.py** (client writes):
+```python
+#%% id: unique-id
+import pandas as pd
+df = pd.read_csv("big.csv")
+print(df.shape)
 ```
+
+The first line is a `#%%` cell header with an optional command ID. The rest is plain Python — no escaping, no JSON encoding.
 
 **output.json** (pyrepl writes):
 ```json
-{"stdout": "hello\n", "stderr": "", "error": null, "id": "unique-id"}
+{"stdout": "(1000, 5)\n", "stderr": "", "error": null, "id": "unique-id"}
 ```
 
-The `id` field prevents reading stale output from a previous command. Files are written atomically (write `.tmp`, then `os.rename`).
+Files are written atomically (write `.tmp`, then `os.rename`). The `id` field prevents reading stale output.
+
+## Install
+
+```bash
+git clone https://github.com/anthropics/pyrepl.git
+cd pyrepl
+```
+
+Make `pyrepl` available on your PATH (pick one):
+
+```bash
+# Option 1: symlink (recommended)
+ln -s "$(pwd)/pyrepl" /usr/local/bin/pyrepl
+
+# Option 2: add directory to PATH
+echo 'export PATH="'$(pwd)':$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Verify:
+
+```bash
+pyrepl start --workdir .
+pyrepl run 'print("hello")'
+pyrepl stop
+```
+
+### Using with Claude Code
+
+Append the agent instructions to Claude Code's system prompt:
+
+```bash
+claude --append-system-prompt-file /path/to/pyrepl/AGENT_PROMPT.md
+```
+
+Or add them to your project's `CLAUDE.md` so they're loaded automatically in every session.
+
+## Tests
+
+```bash
+bash test_pyrepl.sh    # 14 tests: basic execution, persistence, errors, display limits, cells, stdin
+bash test_agent.sh     # 10-step agent walkthrough: loads data, analyzes, reaches a conclusion
+```
 
 ## Requirements
 
