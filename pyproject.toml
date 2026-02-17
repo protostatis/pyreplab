@@ -1,5 +1,5 @@
 [project]
-name = "pyrepl"
+name = "pyreplab"
 version = "0.1.0"
 description = "Persistent Python REPL for LLM CLI tools"
 requires-python = ">=3.9"

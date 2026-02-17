@@ -1,12 +1,12 @@
-# pyrepl Agent Instructions
+# pyreplab Agent Instructions
 
-You have access to a persistent Python REPL via `pyrepl`. Data stays in memory between commands — load once, query many times.
+You have access to a persistent Python REPL via `pyreplab`. Data stays in memory between commands — load once, query many times.
 
 ## Setup (run once at start)
 
 ```bash
 # Start the REPL for the project you're working in
-/path/to/pyrepl start --workdir /path/to/project
+/path/to/pyreplab start --workdir /path/to/project
 ```
 
 The `--workdir` auto-detects `.venv/` so all project packages are available. Sessions are isolated per project.
@@ -33,12 +33,12 @@ print(df.describe())
 ### 2. Run one cell at a time
 
 ```bash
-pyrepl run analysis.py:0
+pyreplab run analysis.py:0
 ```
 
 **Read the output. Think about what it tells you. Then decide what cell to run next.**
 
-Do NOT run all cells blindly. The value of pyrepl is iterative analysis — each cell's output should inform your next step.
+Do NOT run all cells blindly. The value of pyreplab is iterative analysis — each cell's output should inform your next step.
 
 ### 3. Edit and re-run
 
@@ -49,8 +49,8 @@ If a cell's output reveals something unexpected, edit the notebook and re-run th
 For simple one-liners only (no quotes, no f-strings with brackets):
 
 ```bash
-pyrepl run 'print(df.shape)'
-pyrepl run 'print(df.columns.tolist())'
+pyreplab run 'print(df.shape)'
+pyreplab run 'print(df.columns.tolist())'
 ```
 
 **For anything else, write a cell.** Bash quoting breaks f-strings, escaped quotes, and multi-line code. If your code has quotes, brackets, or f-strings — don't inline it. Add a cell to the notebook and run it by index. This is the #1 cause of agent errors.
@@ -58,13 +58,13 @@ pyrepl run 'print(df.columns.tolist())'
 ## Commands reference
 
 ```
-pyrepl start --workdir DIR    Start session (auto-detects .venv/)
-pyrepl run file.py:N          Run cell N from file
-pyrepl run file.py            Run all cells
-pyrepl run 'code'             Run inline code
-pyrepl ps                     Show active sessions
-pyrepl stop                   Stop current session
-pyrepl stop-all               Stop all sessions
+pyreplab start --workdir DIR    Start session (auto-detects .venv/)
+pyreplab run file.py:N          Run cell N from file
+pyreplab run file.py            Run all cells
+pyreplab run 'code'             Run inline code
+pyreplab ps                     Show active sessions
+pyreplab stop                   Stop current session
+pyreplab stop-all               Stop all sessions
 ```
 
 ## Rules

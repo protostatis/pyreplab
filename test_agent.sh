@@ -6,8 +6,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYREPL_DIR="/tmp/pyrepl_agent_test_$$"
-PYREPL="$SCRIPT_DIR/pyrepl"
+export PYREPLAB_DIR="/tmp/pyreplab_agent_test_$$"
+PYREPLAB="$SCRIPT_DIR/pyreplab"
 NOTEBOOK="$SCRIPT_DIR/agent_test.py"
 
 pass=0
@@ -29,23 +29,23 @@ check() {
 }
 
 cleanup() {
-    "$PYREPL" stop 2>/dev/null || true
-    "$PYREPL" clean 2>/dev/null || true
-    [ -d "$PYREPL_DIR" ] && rmdir "$PYREPL_DIR" 2>/dev/null || true
+    "$PYREPLAB" stop 2>/dev/null || true
+    "$PYREPLAB" clean 2>/dev/null || true
+    [ -d "$PYREPLAB_DIR" ] && rmdir "$PYREPLAB_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 echo "=== Agent Walkthrough Test ==="
 echo "Notebook: $NOTEBOOK"
-echo "Session:  $PYREPL_DIR"
+echo "Session:  $PYREPLAB_DIR"
 echo ""
 
-"$PYREPL" start 2>&1
+"$PYREPLAB" start 2>&1
 echo ""
 
 # ── Step 1: Load data ──────────────────────────────────────
 echo "[Step 1/10] Load raw data — how big is the dataset?"
-out=$("$PYREPL" run "$NOTEBOOK":0)
+out=$("$PYREPLAB" run "$NOTEBOOK":0)
 echo "$out"
 check "loaded 2000 orders" "Loaded 2000 orders" "$out"
 check "has date range" "Date range:" "$out"
@@ -55,7 +55,7 @@ echo ""
 
 # ── Step 2: Inspect schema ─────────────────────────────────
 echo "[Step 2/10] Inspect schema — what types are we working with?"
-out=$("$PYREPL" run "$NOTEBOOK":1)
+out=$("$PYREPLAB" run "$NOTEBOOK":1)
 echo "$out"
 check "has datetime column" "datetime64" "$out"
 check "shape is 2000x7" "2000, 7" "$out"
@@ -65,7 +65,7 @@ echo ""
 
 # ── Step 3: Data quality ───────────────────────────────────
 echo "[Step 3/10] Check data quality — any nulls or issues?"
-out=$("$PYREPL" run "$NOTEBOOK":2)
+out=$("$PYREPLAB" run "$NOTEBOOK":2)
 echo "$out"
 check "discount_pct has nulls" "discount_pct" "$out"
 check "4 regions" "East.*North.*South.*West" "$out"
@@ -78,7 +78,7 @@ echo ""
 
 # ── Step 4: Clean and compute revenue ──────────────────────
 echo "[Step 4/10] Clean data — fill nulls, compute revenue"
-out=$("$PYREPL" run "$NOTEBOOK":3)
+out=$("$PYREPLAB" run "$NOTEBOOK":3)
 echo "$out"
 check "zero nulls after cleaning" "Nulls after cleaning: 0" "$out"
 check "revenue stats present" "mean" "$out"
@@ -87,7 +87,7 @@ echo ""
 
 # ── Step 5: Revenue by region ──────────────────────────────
 echo "[Step 5/10] Which region generates the most revenue?"
-out=$("$PYREPL" run "$NOTEBOOK":4)
+out=$("$PYREPLAB" run "$NOTEBOOK":4)
 echo "$out"
 check "top region identified" "Top region by revenue:" "$out"
 top_region=$(echo "$out" | grep "Top region" | awk -F': ' '{print $2}')
@@ -97,7 +97,7 @@ echo ""
 
 # ── Step 6: Revenue by product ─────────────────────────────
 echo "[Step 6/10] Which product generates the most revenue?"
-out=$("$PYREPL" run "$NOTEBOOK":5)
+out=$("$PYREPLAB" run "$NOTEBOOK":5)
 echo "$out"
 check "top product identified" "Top product by revenue:" "$out"
 top_product=$(echo "$out" | grep "Top product" | awk -F': ' '{print $2}')
@@ -107,7 +107,7 @@ echo ""
 
 # ── Step 7: Cross-tab — find the planted anomaly ──────────
 echo "[Step 7/10] Cross-tab — is there a pricing anomaly?"
-out=$("$PYREPL" run "$NOTEBOOK":6)
+out=$("$PYREPLAB" run "$NOTEBOOK":6)
 echo "$out"
 check "West Alpha premium detected" "West Alpha premium:" "$out"
 # Extract the premium percentage
@@ -118,7 +118,7 @@ echo ""
 
 # ── Step 8: Monthly trend ─────────────────────────────────
 echo "[Step 8/10] Monthly trend — is revenue stable?"
-out=$("$PYREPL" run "$NOTEBOOK":7)
+out=$("$PYREPLAB" run "$NOTEBOOK":7)
 echo "$out"
 check "monthly data present" "2024-01" "$out"
 check "has revenue per order" "revenue_per_order" "$out"
@@ -127,7 +127,7 @@ echo ""
 
 # ── Step 9: Correlation analysis ───────────────────────────
 echo "[Step 9/10] What drives revenue — price or quantity?"
-out=$("$PYREPL" run "$NOTEBOOK":8)
+out=$("$PYREPLAB" run "$NOTEBOOK":8)
 echo "$out"
 check "correlation matrix shown" "Correlation matrix:" "$out"
 check "revenue driver identified" "Stronger driver of revenue:" "$out"
@@ -138,7 +138,7 @@ echo ""
 
 # ── Step 10: Final verdict ─────────────────────────────────
 echo "[Step 10/10] Final analysis — what's the conclusion?"
-out=$("$PYREPL" run "$NOTEBOOK":9)
+out=$("$PYREPLAB" run "$NOTEBOOK":9)
 echo "$out"
 check "analysis complete marker" "ANALYSIS COMPLETE" "$out"
 check "conclusion present" "CONCLUSION:" "$out"
@@ -165,7 +165,7 @@ echo "  Conclusion:     ${fact_conclusion}"
 echo "═══════════════════════════════════════════════════"
 echo ""
 
-"$PYREPL" stop 2>&1
+"$PYREPLAB" stop 2>&1
 echo ""
 echo "=== Results: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] && exit 0 || exit 1

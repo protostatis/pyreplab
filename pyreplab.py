@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pyrepl — Persistent Python REPL for LLM CLI tools.
+"""pyreplab — Persistent Python REPL for LLM CLI tools.
 
 A background process that keeps a Python namespace in memory.
 Commands are sent as .py files with #%% cell headers.
@@ -39,7 +39,7 @@ def run_code(code, namespace, timeout=30, max_output=100_000):
                 old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
                 signal.alarm(timeout)
             try:
-                exec(compile(code, "<pyrepl>", "exec"), namespace)
+                exec(compile(code, "<pyreplab>", "exec"), namespace)
             finally:
                 if timeout:
                     signal.alarm(0)
@@ -112,7 +112,7 @@ def activate_venv(venv_path):
     """Activate a virtual environment by adding its site-packages to sys.path."""
     venv_path = os.path.abspath(venv_path)
     if not os.path.isdir(venv_path):
-        print(f"pyrepl: venv not found: {venv_path}", file=sys.stderr)
+        print(f"pyreplab: venv not found: {venv_path}", file=sys.stderr)
         return False
 
     # Find site-packages: lib/pythonX.Y/site-packages (unix) or Lib/site-packages (windows)
@@ -125,7 +125,7 @@ def activate_venv(venv_path):
         site_dirs.extend(glob.glob(pattern))
 
     if not site_dirs:
-        print(f"pyrepl: no site-packages found in {venv_path}", file=sys.stderr)
+        print(f"pyreplab: no site-packages found in {venv_path}", file=sys.stderr)
         return False
 
     for sp in site_dirs:
@@ -140,7 +140,7 @@ def activate_venv(venv_path):
     if os.path.isdir(bin_dir):
         os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
 
-    print(f"pyrepl: activated venv {venv_path} ({', '.join(site_dirs)})", file=sys.stderr)
+    print(f"pyreplab: activated venv {venv_path} ({', '.join(site_dirs)})", file=sys.stderr)
     return True
 
 
@@ -193,7 +193,7 @@ try:
 except ImportError:
     pass
 """
-    exec(compile(setup, "<pyrepl:display>", "exec"), namespace)
+    exec(compile(setup, "<pyreplab:display>", "exec"), namespace)
 
 
 def append_history(session_dir, index, code, stdout, stderr, error):
@@ -203,7 +203,7 @@ def append_history(session_dir, index, code, stdout, stderr, error):
 
     with open(history_path, "a") as f:
         if index == 0:
-            f.write(f"# pyrepl session history\n\n")
+            f.write(f"# pyreplab session history\n\n")
 
         f.write(f"## [{index}] {timestamp}\n\n")
         f.write(f"```python\n{code.strip()}\n```\n\n")
@@ -228,7 +228,7 @@ def cleanup(session_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Persistent Python REPL for LLM CLI tools")
-    parser.add_argument("--session-dir", default="/tmp/pyrepl", help="Session directory (default: /tmp/pyrepl)")
+    parser.add_argument("--session-dir", default="/tmp/pyreplab", help="Session directory (default: /tmp/pyreplab)")
     parser.add_argument("--workdir", default=None, help="Working directory for the REPL")
     parser.add_argument("--venv", default=None, help="Path to virtualenv to activate (auto-detects .venv/ in workdir)")
     parser.add_argument("--conda", default=None, nargs="?", const="base",
@@ -266,9 +266,9 @@ def main():
                 if os.path.isdir(env_path):
                     activate_venv(env_path)
                 else:
-                    print(f"pyrepl: conda env '{args.conda}' not found at {env_path}", file=sys.stderr)
+                    print(f"pyreplab: conda env '{args.conda}' not found at {env_path}", file=sys.stderr)
         else:
-            print("pyrepl: conda not found", file=sys.stderr)
+            print("pyreplab: conda not found", file=sys.stderr)
     elif not args.no_conda:
         # Auto-detect: no .venv/ found, try conda base as fallback
         conda_base = find_conda_base()
@@ -282,7 +282,7 @@ def main():
     output_path = os.path.join(session_dir, "output.json")
     done_path = os.path.join(session_dir, "done")
 
-    namespace = {"__name__": "__pyrepl__", "__builtins__": __builtins__}
+    namespace = {"__name__": "__pyreplab__", "__builtins__": __builtins__}
     configure_display(namespace, max_rows=args.max_rows, max_cols=args.max_cols)
     exec_index = 0
     running = True
@@ -294,7 +294,7 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    print(f"pyrepl: listening on {session_dir} (poll={args.poll_interval}s, timeout={args.timeout}s)", file=sys.stderr)
+    print(f"pyreplab: listening on {session_dir} (poll={args.poll_interval}s, timeout={args.timeout}s)", file=sys.stderr)
 
     while running:
         if not os.path.exists(cmd_path):
@@ -329,7 +329,7 @@ def main():
             f.write(cmd_id)
 
     cleanup(session_dir)
-    print("pyrepl: shutdown", file=sys.stderr)
+    print("pyreplab: shutdown", file=sys.stderr)
 
 
 if __name__ == "__main__":

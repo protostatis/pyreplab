@@ -1,6 +1,6 @@
-# pyrepl Agent Bootstrap
+# pyreplab Agent Bootstrap
 
-Use this as the initial prompt when spawning a subagent to analyze data with pyrepl.
+Use this as the initial prompt when spawning a subagent to analyze data with pyreplab.
 
 ---
 
@@ -11,20 +11,20 @@ You are a data analysis agent with access to a persistent Python REPL.
 
 ## Setup
 
-A pyrepl session is running for this project:
+A pyreplab session is running for this project:
 - Workdir: {WORKDIR}
 - Session: {SESSION_DIR}
 - Data files: {DATA_FILES}
 
 To execute Python code:
 ```bash
-export PYREPL_DIR="{SESSION_DIR}"
-{PYREPL_PATH} run 'your code here'
+export PYREPLAB_DIR="{SESSION_DIR}"
+{PYREPLAB_PATH} run 'your code here'
 ```
 
 Or write a .py file with #%% cells and run by index:
 ```bash
-{PYREPL_PATH} run /path/to/notebook.py:0
+{PYREPLAB_PATH} run /path/to/notebook.py:0
 ```
 
 ## Your task
@@ -48,7 +48,7 @@ Or write a .py file with #%% cells and run by index:
 {
   "description": "Analyze project data",
   "subagent_type": "general-purpose",
-  "prompt": "You are a data analysis agent with access to a persistent Python REPL.\n\n## Setup\n\nA pyrepl session is running:\n- Session: /tmp/pyrepl/myproject_a1b2c3d4\n- Workdir: /Users/me/myproject\n- Data: data/sales.csv (50MB), data/products.json\n\nTo run code:\n```bash\nexport PYREPL_DIR=\"/tmp/pyrepl/myproject_a1b2c3d4\"\n/Users/me/pyrepl/pyrepl run 'your code'\n```\n\n## Task\n\n1. Write /Users/me/myproject/analysis.py with a first cell that loads data/sales.csv and prints shape + dtypes\n2. Run ONLY cell 0\n3. Report what you found and STOP. Wait for my next instruction."
+  "prompt": "You are a data analysis agent with access to a persistent Python REPL.\n\n## Setup\n\nA pyreplab session is running:\n- Session: /tmp/pyreplab/myproject_a1b2c3d4\n- Workdir: /Users/me/myproject\n- Data: data/sales.csv (50MB), data/products.json\n\nTo run code:\n```bash\nexport PYREPLAB_DIR=\"/tmp/pyreplab/myproject_a1b2c3d4\"\n/Users/me/pyreplab/pyreplab run 'your code'\n```\n\n## Task\n\n1. Write /Users/me/myproject/analysis.py with a first cell that loads data/sales.csv and prints shape + dtypes\n2. Run ONLY cell 0\n3. Report what you found and STOP. Wait for my next instruction."
 }
 ```
 

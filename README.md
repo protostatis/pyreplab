@@ -1,8 +1,8 @@
-# pyrepl
+# pyreplab
 
 Persistent Python REPL for LLM CLI tools.
 
-LLM coding CLIs (Claude Code, Copilot CLI, etc.) can't maintain a persistent Python session — each bash command runs in a fresh process. For large datasets, reloading on every query is impractical. pyrepl fixes this.
+LLM coding CLIs (Claude Code, Copilot CLI, etc.) can't maintain a persistent Python session — each bash command runs in a fresh process. For large datasets, reloading on every query is impractical. pyreplab fixes this.
 
 ## How it works
 
@@ -30,19 +30,19 @@ print(df.head(20))
 Then run cells:
 
 ```bash
-pyrepl start --workdir /path/to/project   # start (auto-detects .venv/)
-pyrepl run analysis.py:0                  # Load data
-pyrepl run analysis.py:1                  # Explore (df still loaded)
-pyrepl run analysis.py:2                  # Top rows (no reload)
-pyrepl stop
+pyreplab start --workdir /path/to/project   # start (auto-detects .venv/)
+pyreplab run analysis.py:0                  # Load data
+pyreplab run analysis.py:1                  # Explore (df still loaded)
+pyreplab run analysis.py:2                  # Top rows (no reload)
+pyreplab stop
 ```
 
 ## CLI reference
 
 ```
-pyrepl <command> [args]
+pyreplab <command> [args]
 
-  start [opts]        Start the REPL (opts passed to pyrepl.py)
+  start [opts]        Start the REPL (opts passed to pyreplab.py)
   run file.py         Run all #%% cells in file
   run file.py:N       Run cell N from file (0-indexed)
   run 'code'          Run inline code
@@ -57,9 +57,9 @@ pyrepl <command> [args]
 ## Server options
 
 ```
-python pyrepl.py [options]
+python pyreplab.py [options]
 
-  --session-dir DIR    Session directory (default: /tmp/pyrepl)
+  --session-dir DIR    Session directory (default: /tmp/pyreplab)
   --workdir DIR        Working directory for the REPL
   --venv PATH          Path to virtualenv (auto-detects .venv/ in workdir)
   --conda [ENV]        Activate conda env (default: base)
@@ -73,7 +73,7 @@ python pyrepl.py [options]
 
 ## Environment detection
 
-pyrepl automatically detects and activates Python environments so your project packages are available. Detection follows a priority order — the first match wins:
+pyreplab automatically detects and activates Python environments so your project packages are available. Detection follows a priority order — the first match wins:
 
 | Priority | Source | How it's found |
 |----------|--------|----------------|
@@ -82,16 +82,16 @@ pyrepl automatically detects and activates Python environments so your project p
 | 3 | `--conda [ENV]` | Explicit flag |
 | 4 | Conda base | Auto-detected fallback |
 
-If a project has a `.venv/`, that always takes precedence over conda. If no `.venv/` exists, pyrepl falls back to conda's base environment (giving you numpy, pandas, scipy, etc. out of the box). Use `--no-conda` to disable the fallback.
+If a project has a `.venv/`, that always takes precedence over conda. If no `.venv/` exists, pyreplab falls back to conda's base environment (giving you numpy, pandas, scipy, etc. out of the box). Use `--no-conda` to disable the fallback.
 
 ### Virtual environments (venv, uv, virtualenv)
 
 ```bash
 # Auto-detect .venv/ in workdir (most common)
-pyrepl start --workdir /path/to/project
+pyreplab start --workdir /path/to/project
 
 # Explicit path to any virtualenv
-pyrepl start --venv /path/to/.venv
+pyreplab start --venv /path/to/.venv
 ```
 
 Works with `uv venv`, `python -m venv`, or any standard virtualenv.
@@ -100,16 +100,16 @@ Works with `uv venv`, `python -m venv`, or any standard virtualenv.
 
 ```bash
 # Auto-detect: if no .venv/, conda base is used automatically
-pyrepl start --workdir /path/to/project
+pyreplab start --workdir /path/to/project
 
 # Explicit: force conda base
-pyrepl start --conda
+pyreplab start --conda
 
 # Named conda env
-pyrepl start --conda myenv
+pyreplab start --conda myenv
 
 # Disable conda fallback (bare Python only)
-pyrepl start --no-conda
+pyreplab start --no-conda
 ```
 
 Conda base is found by checking, in order:
@@ -125,21 +125,21 @@ Each `--workdir` gets its own isolated session — separate process, namespace, 
 
 ```bash
 # Two projects, two sessions
-pyrepl start --workdir ~/projects/project-a
-pyrepl start --workdir ~/projects/project-b
+pyreplab start --workdir ~/projects/project-a
+pyreplab start --workdir ~/projects/project-b
 
 # See what's running
-pyrepl ps
+pyreplab ps
 # SESSION                      PID     UPTIME   MEM    DIR
-# project-a_a1b2c3d4           12345   5m30s    57MB   /tmp/pyrepl/project-a_a1b2c3d4
-# project-b_e5f6g7h8           12346   2m15s    43MB   /tmp/pyrepl/project-b_e5f6g7h8
+# project-a_a1b2c3d4           12345   5m30s    57MB   /tmp/pyreplab/project-a_a1b2c3d4
+# project-b_e5f6g7h8           12346   2m15s    43MB   /tmp/pyreplab/project-b_e5f6g7h8
 
 # Commands auto-resolve to the right session based on cwd
-cd ~/projects/project-a && pyrepl run analysis.py:0
-cd ~/projects/project-b && pyrepl run analysis.py:0
+cd ~/projects/project-a && pyreplab run analysis.py:0
+cd ~/projects/project-b && pyreplab run analysis.py:0
 
 # Stop everything
-pyrepl stop-all
+pyreplab stop-all
 ```
 
 ## Display limits
@@ -167,7 +167,7 @@ print(df.shape)
 
 The first line is a `#%%` cell header with an optional command ID. The rest is plain Python — no escaping, no JSON encoding.
 
-**output.json** (pyrepl writes):
+**output.json** (pyreplab writes):
 ```json
 {"stdout": "(1000, 5)\n", "stderr": "", "error": null, "id": "unique-id"}
 ```
@@ -177,15 +177,15 @@ Files are written atomically (write `.tmp`, then `os.rename`). The `id` field pr
 ## Install
 
 ```bash
-git clone https://github.com/anthropics/pyrepl.git
-cd pyrepl
+git clone https://github.com/anthropics/pyreplab.git
+cd pyreplab
 ```
 
-Make `pyrepl` available on your PATH (pick one):
+Make `pyreplab` available on your PATH (pick one):
 
 ```bash
 # Option 1: symlink (recommended)
-ln -s "$(pwd)/pyrepl" /usr/local/bin/pyrepl
+ln -s "$(pwd)/pyreplab" /usr/local/bin/pyreplab
 
 # Option 2: add directory to PATH
 echo 'export PATH="'$(pwd)':$PATH"' >> ~/.zshrc
@@ -195,9 +195,9 @@ source ~/.zshrc
 Verify:
 
 ```bash
-pyrepl start --workdir .
-pyrepl run 'print("hello")'
-pyrepl stop
+pyreplab start --workdir .
+pyreplab run 'print("hello")'
+pyreplab stop
 ```
 
 ### Using with Claude Code
@@ -205,7 +205,7 @@ pyrepl stop
 Append the agent instructions to Claude Code's system prompt:
 
 ```bash
-claude --append-system-prompt-file /path/to/pyrepl/AGENT_PROMPT.md
+claude --append-system-prompt-file /path/to/pyreplab/AGENT_PROMPT.md
 ```
 
 Or add them to your project's `CLAUDE.md` so they're loaded automatically in every session.
@@ -213,7 +213,7 @@ Or add them to your project's `CLAUDE.md` so they're loaded automatically in eve
 ## Tests
 
 ```bash
-bash test_pyrepl.sh    # 14 tests: basic execution, persistence, errors, display limits, cells, stdin
+bash test_pyreplab.sh    # 14 tests: basic execution, persistence, errors, display limits, cells, stdin
 bash test_agent.sh     # 10-step agent walkthrough: loads data, analyzes, reaches a conclusion
 ```
 

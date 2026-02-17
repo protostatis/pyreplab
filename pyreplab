@@ -1,56 +1,56 @@
 #!/usr/bin/env bash
-# pyrepl — CLI for the persistent Python REPL
+# pyreplab — CLI for the persistent Python REPL
 #
 # Usage:
-#   pyrepl start [--workdir DIR] [--venv PATH] [...]
-#   pyrepl run notebook.py       Run all cells
-#   pyrepl run notebook.py:2     Run cell 2
-#   pyrepl run 'print("hello")'  Inline code
-#   pyrepl run < script.py       Read from stdin
-#   pyrepl stop
-#   pyrepl clean
+#   pyreplab start [--workdir DIR] [--venv PATH] [...]
+#   pyreplab run notebook.py       Run all cells
+#   pyreplab run notebook.py:2     Run cell 2
+#   pyreplab run 'print("hello")'  Inline code
+#   pyreplab run < script.py       Read from stdin
+#   pyreplab stop
+#   pyreplab clean
 #
 # No sourcing needed. Each invocation is standalone.
 
 set -euo pipefail
 
-PYREPL_BASE="${PYREPL_BASE:-/tmp/pyrepl}"
-PYREPL_SCRIPT="${PYREPL_SCRIPT:-$(cd "$(dirname "$0")" && pwd)/pyrepl.py}"
+PYREPLAB_BASE="${PYREPLAB_BASE:-/tmp/pyreplab}"
+PYREPLAB_SCRIPT="${PYREPLAB_SCRIPT:-$(cd "$(dirname "$0")" && pwd)/pyreplab.py}"
 
-# Resolve session dir: explicit PYREPL_DIR, or derived from workdir
+# Resolve session dir: explicit PYREPLAB_DIR, or derived from workdir
 _resolve_dir() {
-    if [ -n "${PYREPL_DIR:-}" ]; then
-        echo "$PYREPL_DIR"
-    elif [ -n "${_PYREPL_WORKDIR:-}" ]; then
+    if [ -n "${PYREPLAB_DIR:-}" ]; then
+        echo "$PYREPLAB_DIR"
+    elif [ -n "${_PYREPLAB_WORKDIR:-}" ]; then
         # Hash the workdir into a short session name
         local hash
-        hash=$(printf '%s' "$_PYREPL_WORKDIR" | md5sum 2>/dev/null | cut -c1-8 || printf '%s' "$_PYREPL_WORKDIR" | md5 -q 2>/dev/null | cut -c1-8)
+        hash=$(printf '%s' "$_PYREPLAB_WORKDIR" | md5sum 2>/dev/null | cut -c1-8 || printf '%s' "$_PYREPLAB_WORKDIR" | md5 -q 2>/dev/null | cut -c1-8)
         local name
-        name=$(basename "$_PYREPL_WORKDIR")
-        echo "$PYREPL_BASE/${name}_${hash}"
+        name=$(basename "$_PYREPLAB_WORKDIR")
+        echo "$PYREPLAB_BASE/${name}_${hash}"
     else
-        echo "$PYREPL_BASE/default"
+        echo "$PYREPLAB_BASE/default"
     fi
 }
 
 # Extract --workdir from args, or default to cwd
-_PYREPL_WORKDIR=""
+_PYREPLAB_WORKDIR=""
 _parse_workdir() {
     local args=("$@")
     for ((i=0; i<${#args[@]}; i++)); do
         if [ "${args[$i]}" = "--workdir" ] && [ $((i+1)) -lt ${#args[@]} ]; then
-            _PYREPL_WORKDIR="$(cd "${args[$((i+1))]}" && pwd)"
+            _PYREPLAB_WORKDIR="$(cd "${args[$((i+1))]}" && pwd)"
             return
         fi
     done
     # Default: cwd
-    _PYREPL_WORKDIR="$(pwd)"
+    _PYREPLAB_WORKDIR="$(pwd)"
 }
 
 _is_running() {
     local dir
     dir=$(_resolve_dir)
-    local pidfile="$dir/pyrepl.pid"
+    local pidfile="$dir/pyreplab.pid"
     [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
 }
 
@@ -58,31 +58,31 @@ cmd_start() {
     _parse_workdir "$@"
     local dir
     dir=$(_resolve_dir)
-    local pidfile="$dir/pyrepl.pid"
+    local pidfile="$dir/pyreplab.pid"
 
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-        echo "pyrepl: already running (pid $(cat "$pidfile"), dir $dir)" >&2
+        echo "pyreplab: already running (pid $(cat "$pidfile"), dir $dir)" >&2
         return 0
     fi
     mkdir -p "$dir"
-    python3 "$PYREPL_SCRIPT" --session-dir "$dir" "$@" &
+    python3 "$PYREPLAB_SCRIPT" --session-dir "$dir" "$@" &
     local pid=$!
     echo "$pid" > "$pidfile"
     sleep 0.3
     if ! kill -0 "$pid" 2>/dev/null; then
-        echo "pyrepl: failed to start" >&2
+        echo "pyreplab: failed to start" >&2
         rm -f "$pidfile"
         return 1
     fi
-    echo "pyrepl: started (pid $pid, dir $dir)" >&2
+    echo "pyreplab: started (pid $pid, dir $dir)" >&2
 }
 
 cmd_stop() {
     local dir
     dir=$(_resolve_dir)
-    local pidfile="$dir/pyrepl.pid"
+    local pidfile="$dir/pyreplab.pid"
     if ! [ -f "$pidfile" ] || ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-        echo "pyrepl: not running" >&2
+        echo "pyreplab: not running" >&2
         rm -f "$pidfile"
         return 0
     fi
@@ -95,7 +95,7 @@ cmd_stop() {
         i=$((i + 1))
     done
     rm -f "$pidfile"
-    echo "pyrepl: stopped (pid $pid)" >&2
+    echo "pyreplab: stopped (pid $pid)" >&2
 }
 
 cmd_clean() {
@@ -104,7 +104,7 @@ cmd_clean() {
     for f in cmd.py cmd.py.tmp output.json output.json.tmp done; do
         [ -f "$dir/$f" ] && rm -f "$dir/$f"
     done
-    echo "pyrepl: cleaned session files in $dir" >&2
+    echo "pyreplab: cleaned session files in $dir" >&2
 }
 
 _extract_cell() {
@@ -140,14 +140,14 @@ else:
 
 idx = int(sys.argv[2])
 if idx < 0 or idx >= len(cells):
-    print(f"pyrepl: cell {idx} not found (file has {len(cells)} cells)", file=sys.stderr)
+    print(f"pyreplab: cell {idx} not found (file has {len(cells)} cells)", file=sys.stderr)
     sys.exit(1)
 print(cells[idx], end="")
 ' "$file" "$cell_idx"
 }
 
 _send_code() {
-    # Send code to the pyrepl server and print the response.
+    # Send code to the pyreplab server and print the response.
     local code="$1"
     local dir
     dir=$(_resolve_dir)
@@ -156,7 +156,7 @@ _send_code() {
     local cmd_path="$dir/cmd.py"
     local done_path="$dir/done"
     local output_path="$dir/output.json"
-    local timeout="${PYREPL_TIMEOUT:-30}"
+    local timeout="${PYREPLAB_TIMEOUT:-30}"
 
     # Remove stale handshake files
     rm -f "$done_path" "$output_path"
@@ -171,7 +171,7 @@ _send_code() {
         sleep 0.1
         elapsed=$((elapsed + 1))
         if [ "$elapsed" -ge "$((timeout * 10))" ]; then
-            echo "pyrepl: timed out waiting for response" >&2
+            echo "pyreplab: timed out waiting for response" >&2
             return 1
         fi
     done
@@ -183,7 +183,7 @@ _send_code() {
     local result
     result=$(cat "$output_path" 2>/dev/null) || true
     if [ -z "$result" ]; then
-        echo "pyrepl: no output received" >&2
+        echo "pyreplab: no output received" >&2
         return 1
     fi
     rm -f "$output_path"
@@ -206,8 +206,8 @@ if error:
 }
 
 cmd_run() {
-    # Resolve session from cwd (unless PYREPL_DIR is set)
-    [ -z "${PYREPL_DIR:-}" ] && _parse_workdir
+    # Resolve session from cwd (unless PYREPLAB_DIR is set)
+    [ -z "${PYREPLAB_DIR:-}" ] && _parse_workdir
     local code=""
     local arg="${1:-}"
 
@@ -215,10 +215,10 @@ cmd_run() {
         # No args: read from stdin
         code=$(cat)
     elif [ -f "$arg" ]; then
-        # pyrepl run file.py — run whole file
+        # pyreplab run file.py — run whole file
         code=$(_extract_cell "$arg" all)
     elif [[ "$arg" == *:* ]] && [ -f "${arg%%:*}" ]; then
-        # pyrepl run file.py:N — run cell N (only if file exists)
+        # pyreplab run file.py:N — run cell N (only if file exists)
         local file="${arg%%:*}"
         local cell="${arg##*:}"
         code=$(_extract_cell "$file" "$cell")
@@ -228,7 +228,7 @@ cmd_run() {
     fi
 
     if [ -z "$code" ]; then
-        echo "pyrepl: no code to run" >&2
+        echo "pyreplab: no code to run" >&2
         return 1
     fi
 
@@ -238,11 +238,11 @@ cmd_run() {
 cmd_status() {
     local dir
     dir=$(_resolve_dir)
-    local pidfile="$dir/pyrepl.pid"
+    local pidfile="$dir/pyreplab.pid"
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-        echo "pyrepl: running (pid $(cat "$pidfile"), dir $dir)"
+        echo "pyreplab: running (pid $(cat "$pidfile"), dir $dir)"
     else
-        echo "pyrepl: not running"
+        echo "pyreplab: not running"
         return 1
     fi
 }
@@ -251,7 +251,7 @@ cmd_ps() {
     local found=0
     local format="%-28s %-7s %-8s %-6s %s\n"
     printf "$format" "SESSION" "PID" "UPTIME" "MEM" "DIR"
-    for pidfile in "$PYREPL_BASE"/*/pyrepl.pid; do
+    for pidfile in "$PYREPLAB_BASE"/*/pyreplab.pid; do
         [ -f "$pidfile" ] || continue
         local pid dir name
         pid=$(cat "$pidfile")
@@ -296,13 +296,13 @@ cmd_ps() {
         fi
     done
     if [ "$found" -eq 0 ]; then
-        echo "pyrepl: no active sessions"
+        echo "pyreplab: no active sessions"
     fi
 }
 
 cmd_stop_all() {
     local stopped=0
-    for pidfile in "$PYREPL_BASE"/*/pyrepl.pid; do
+    for pidfile in "$PYREPLAB_BASE"/*/pyreplab.pid; do
         [ -f "$pidfile" ] || continue
         local pid dir name
         pid=$(cat "$pidfile")
@@ -315,15 +315,15 @@ cmd_stop_all() {
                 sleep 0.1
                 i=$((i + 1))
             done
-            echo "pyrepl: stopped $name (pid $pid)" >&2
+            echo "pyreplab: stopped $name (pid $pid)" >&2
             stopped=$((stopped + 1))
         fi
         rm -f "$pidfile"
     done
     if [ "$stopped" -eq 0 ]; then
-        echo "pyrepl: no sessions to stop" >&2
+        echo "pyreplab: no sessions to stop" >&2
     else
-        echo "pyrepl: stopped $stopped session(s)" >&2
+        echo "pyreplab: stopped $stopped session(s)" >&2
     fi
 }
 
@@ -337,10 +337,10 @@ case "${1:-help}" in
     status) shift; _parse_workdir "$@"; cmd_status ;;
     ps|list|ls) cmd_ps ;;
     help|--help|-h)
-        echo "Usage: pyrepl <command> [args]"
+        echo "Usage: pyreplab <command> [args]"
         echo ""
         echo "Commands:"
-        echo "  start [opts]        Start the REPL (opts passed to pyrepl.py)"
+        echo "  start [opts]        Start the REPL (opts passed to pyreplab.py)"
         echo "  run file.py         Run all #%% cells in file"
         echo "  run file.py:N       Run cell N from file (0-indexed)"
         echo "  run 'code'          Run inline code"
@@ -351,10 +351,10 @@ case "${1:-help}" in
         echo "  ps                  List all active sessions"
         echo "  clean               Remove session files"
         echo ""
-        echo "Sessions are isolated per --workdir. Set PYREPL_DIR to override."
+        echo "Sessions are isolated per --workdir. Set PYREPLAB_DIR to override."
         ;;
     *)
-        echo "pyrepl: unknown command '$1' (try 'pyrepl help')" >&2
+        echo "pyreplab: unknown command '$1' (try 'pyreplab help')" >&2
         exit 1
         ;;
 esac
