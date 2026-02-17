@@ -149,6 +149,7 @@ print(cells[idx], end="")
 _send_code() {
     # Send code to the pyreplab server and print the response.
     local code="$1"
+    local cell_label="${2:-}"
     local dir
     dir=$(_resolve_dir)
     local id
@@ -162,7 +163,9 @@ _send_code() {
     rm -f "$done_path" "$output_path"
 
     # Write cmd.py with #%% cell header (atomic: write tmp, then move)
-    printf '#%%%% id: %s\n%s\n' "$id" "$code" > "$cmd_path.tmp"
+    local header="id: $id"
+    [ -n "$cell_label" ] && header="$header cell: $cell_label"
+    printf '#%%%% %s\n%s\n' "$header" "$code" > "$cmd_path.tmp"
     mv "$cmd_path.tmp" "$cmd_path"
 
     # Poll for completion
@@ -205,11 +208,42 @@ if error:
 '
 }
 
+cmd_cells() {
+    local file="${1:-}"
+    if [ -z "$file" ] || ! [ -f "$file" ]; then
+        echo "Usage: pyreplab cells <file.py>" >&2
+        return 1
+    fi
+    python3 -c '
+import sys, re
+text = open(sys.argv[1]).read()
+markers = list(re.finditer(r"(?m)^#%%[^\n]*$", text))
+if not markers:
+    # No #%% markers — whole file is cell 0
+    first = text.split("\n")[0].strip()
+    print(f"  0: {first}")
+    sys.exit(0)
+# If file starts with content before first #%%, that is cell 0 (preamble)
+if markers[0].start() > 0:
+    pre = text[:markers[0].start()].strip().split("\n")
+    first = next((l.strip() for l in pre if l.strip()), "(empty)")
+    print(f"  0: {first}")
+    offset = 1
+else:
+    offset = 0
+for i, m in enumerate(markers):
+    label = m.group().lstrip("#% ").strip() or "(unnamed)"
+    print(f"  {i + offset}: #%% {label}")
+' "$file"
+}
+
 cmd_run() {
     # Resolve session from cwd (unless PYREPLAB_DIR is set)
     [ -z "${PYREPLAB_DIR:-}" ] && _parse_workdir
     local code=""
     local arg="${1:-}"
+
+    local cell_label=""
 
     if [ -z "$arg" ]; then
         # No args: read from stdin
@@ -217,11 +251,13 @@ cmd_run() {
     elif [ -f "$arg" ]; then
         # pyreplab run file.py — run whole file
         code=$(_extract_cell "$arg" all)
+        cell_label="$(basename "$arg")"
     elif [[ "$arg" == *:* ]] && [ -f "${arg%%:*}" ]; then
         # pyreplab run file.py:N — run cell N (only if file exists)
         local file="${arg%%:*}"
         local cell="${arg##*:}"
         code=$(_extract_cell "$file" "$cell")
+        cell_label="$(basename "$file"):$cell"
     else
         # Inline code
         code="$arg"
@@ -232,7 +268,7 @@ cmd_run() {
         return 1
     fi
 
-    _send_code "$code"
+    _send_code "$code" "$cell_label"
 }
 
 cmd_status() {
@@ -334,6 +370,7 @@ case "${1:-help}" in
     stop-all) cmd_stop_all ;;
     clean)  shift; _parse_workdir "$@"; cmd_clean ;;
     run)    shift; cmd_run "$@" ;;
+    cells)  shift; cmd_cells "$@" ;;
     status) shift; _parse_workdir "$@"; cmd_status ;;
     ps|list|ls) cmd_ps ;;
     help|--help|-h)
@@ -345,6 +382,7 @@ case "${1:-help}" in
         echo "  run file.py:N       Run cell N from file (0-indexed)"
         echo "  run 'code'          Run inline code"
         echo "  run                 Read code from stdin"
+        echo "  cells file.py       List cell indices and summaries"
         echo "  stop                Stop the current session"
         echo "  stop-all            Stop all active sessions"
         echo "  status              Check if REPL is running"

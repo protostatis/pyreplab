@@ -27,11 +27,12 @@ def atomic_write(path, data):
     os.rename(tmp, path)
 
 
-def run_code(code, namespace, timeout=30, max_output=100_000):
+def run_code(code, namespace, timeout=30, max_output=100_000, label=""):
     """Execute code in the persistent namespace, capturing output."""
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
     error = None
+    filename = f"<pyreplab:{label}>" if label else "<pyreplab>"
 
     try:
         with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
@@ -39,7 +40,7 @@ def run_code(code, namespace, timeout=30, max_output=100_000):
                 old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
                 signal.alarm(timeout)
             try:
-                exec(compile(code, "<pyreplab>", "exec"), namespace)
+                exec(compile(code, filename, "exec"), namespace)
             finally:
                 if timeout:
                     signal.alarm(0)
@@ -96,16 +97,22 @@ def _timeout_handler(signum, frame):
 
 
 def parse_cmd_file(text):
-    """Parse a cmd.py file. First line is '#%% id: xxx', rest is code."""
+    """Parse a cmd.py file. First line is '#%% id: xxx cell: label', rest is code."""
     lines = text.split("\n")
     cmd_id = ""
+    cell_label = ""
     if lines and lines[0].startswith("#%%"):
         header = lines[0]
         if "id:" in header:
-            cmd_id = header.split("id:", 1)[1].strip()
+            id_part = header.split("id:", 1)[1]
+            if "cell:" in id_part:
+                cmd_id = id_part.split("cell:", 1)[0].strip()
+                cell_label = id_part.split("cell:", 1)[1].strip()
+            else:
+                cmd_id = id_part.strip()
         lines = lines[1:]
     code = "\n".join(lines)
-    return code, cmd_id
+    return code, cmd_id, cell_label
 
 
 def activate_venv(venv_path):
@@ -294,6 +301,7 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+    print(f"pyreplab: python {sys.version.split()[0]} ({sys.executable})", file=sys.stderr)
     print(f"pyreplab: listening on {session_dir} (poll={args.poll_interval}s, timeout={args.timeout}s)", file=sys.stderr)
 
     while running:
@@ -310,9 +318,9 @@ def main():
 
         os.remove(cmd_path)
 
-        code, cmd_id = parse_cmd_file(text)
+        code, cmd_id, cell_label = parse_cmd_file(text)
 
-        stdout, stderr, error = run_code(code, namespace, timeout=args.timeout, max_output=args.max_output)
+        stdout, stderr, error = run_code(code, namespace, timeout=args.timeout, max_output=args.max_output, label=cell_label)
 
         append_history(session_dir, exec_index, code, stdout, stderr, error)
         exec_index += 1
