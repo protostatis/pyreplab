@@ -27,8 +27,13 @@ def atomic_write(path, data):
     os.rename(tmp, path)
 
 
-def run_code(code, namespace, timeout=30, max_output=100_000, label=""):
-    """Execute code in the persistent namespace, capturing output."""
+def run_code(code, namespace, max_output=100_000, label=""):
+    """Execute code in the persistent namespace, capturing output.
+
+    No server-side timeout — commands run to completion. The client handles
+    async polling (returns exit code 2 after its poll timeout, then
+    `pyreplab wait` resumes polling until the server writes output).
+    """
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
     error = None
@@ -36,17 +41,7 @@ def run_code(code, namespace, timeout=30, max_output=100_000, label=""):
 
     try:
         with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
-            if timeout:
-                old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-                signal.alarm(timeout)
-            try:
-                exec(compile(code, filename, "exec"), namespace)
-            finally:
-                if timeout:
-                    signal.alarm(0)
-                    signal.signal(signal.SIGALRM, old_handler)
-    except TimeoutError:
-        error = f"Timeout: command exceeded {timeout}s limit"
+            exec(compile(code, filename, "exec"), namespace)
     except Exception:
         error = traceback.format_exc()
 
@@ -90,10 +85,6 @@ def _truncate(text, max_chars):
     else:
         msg = f"\n... truncated ({len(text)} chars total) ...\n"
     return "".join(head) + msg + "".join(tail)
-
-
-def _timeout_handler(signum, frame):
-    raise TimeoutError()
 
 
 def parse_cmd_file(text):
@@ -242,7 +233,6 @@ def main():
     parser.add_argument("--conda", default=None, nargs="?", const="base",
                         help="Activate conda env (default: base). Use --conda for base, --conda envname for a named env")
     parser.add_argument("--no-conda", action="store_true", help="Disable conda auto-detection")
-    parser.add_argument("--timeout", type=int, default=119, help="Per-command timeout in seconds (default: 119)")
     parser.add_argument("--max-output", type=int, default=100_000, help="Max output chars (default: 100000)")
     parser.add_argument("--max-rows", type=int, default=50, help="Pandas max display rows (default: 50)")
     parser.add_argument("--max-cols", type=int, default=20, help="Pandas max display columns (default: 20)")
@@ -308,7 +298,7 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
 
     print(f"pyreplab: python {sys.version.split()[0]} ({sys.executable})", file=sys.stderr)
-    print(f"pyreplab: listening on {session_dir} (poll={args.poll_interval}s, timeout={args.timeout}s)", file=sys.stderr)
+    print(f"pyreplab: listening on {session_dir} (poll={args.poll_interval}s)", file=sys.stderr)
 
     while running:
         if not os.path.exists(cmd_path):
@@ -326,7 +316,7 @@ def main():
 
         code, cmd_id, cell_label = parse_cmd_file(text)
 
-        stdout, stderr, error = run_code(code, namespace, timeout=args.timeout, max_output=args.max_output, label=cell_label)
+        stdout, stderr, error = run_code(code, namespace, max_output=args.max_output, label=cell_label)
 
         append_history(session_dir, exec_index, code, stdout, stderr, error)
         exec_index += 1

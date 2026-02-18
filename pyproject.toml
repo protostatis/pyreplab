@@ -1,6 +1,6 @@
 [project]
 name = "pyreplab"
-version = "0.2.1"
+version = "0.3.0"
 description = "Persistent Python REPL for LLM CLI tools"
 requires-python = ">=3.9"
 dependencies = []
