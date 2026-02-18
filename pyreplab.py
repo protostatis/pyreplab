@@ -242,7 +242,7 @@ def main():
     parser.add_argument("--conda", default=None, nargs="?", const="base",
                         help="Activate conda env (default: base). Use --conda for base, --conda envname for a named env")
     parser.add_argument("--no-conda", action="store_true", help="Disable conda auto-detection")
-    parser.add_argument("--timeout", type=int, default=30, help="Per-command timeout in seconds (default: 30)")
+    parser.add_argument("--timeout", type=int, default=119, help="Per-command timeout in seconds (default: 119)")
     parser.add_argument("--max-output", type=int, default=100_000, help="Max output chars (default: 100000)")
     parser.add_argument("--max-rows", type=int, default=50, help="Pandas max display rows (default: 50)")
     parser.add_argument("--max-cols", type=int, default=20, help="Pandas max display columns (default: 20)")

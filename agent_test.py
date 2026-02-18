@@ -1,4 +1,4 @@
-#%% Cell 0: Load raw data
+# %% [0] Cell 0: Load raw data
 import pandas as pd
 import numpy as np
 
@@ -26,13 +26,13 @@ print(f"Loaded {len(df)} orders")
 print(f"Columns: {list(df.columns)}")
 print(f"Date range: {df['date'].min()} to {df['date'].max()}")
 
-#%% Cell 1: Inspect schema and types
+# %% [1] Cell 1: Inspect schema and types
 print(df.dtypes)
 print(f"\nShape: {df.shape}")
 print(f"\nSample:")
 print(df.head(10))
 
-#%% Cell 2: Check data quality
+# %% [2] Cell 2: Check data quality
 nulls = df.isnull().sum()
 print("Null counts:")
 print(nulls[nulls > 0])
@@ -42,7 +42,7 @@ print(f"Unique products: {sorted(df['product'].unique())}")
 print(f"\nunit_price range: {df['unit_price'].min():.2f} - {df['unit_price'].max():.2f}")
 print(f"units range: {df['units'].min()} - {df['units'].max()}")
 
-#%% Cell 3: Clean data — fill nulls and compute revenue
+# %% [3] Cell 3: Clean data — fill nulls and compute revenue
 df["discount_pct"] = df["discount_pct"].fillna(0).astype(float)
 df["revenue"] = df["units"] * df["unit_price"] * (1 - df["discount_pct"] / 100)
 df["month"] = df["date"].dt.to_period("M")
@@ -51,7 +51,7 @@ print(f"Nulls after cleaning: {df.isnull().sum().sum()}")
 print(f"Revenue stats:")
 print(df["revenue"].describe())
 
-#%% Cell 4: Revenue by region
+# %% [4] Cell 4: Revenue by region
 region_stats = (
     df.groupby("region")
     .agg(
@@ -65,7 +65,7 @@ region_stats["revenue_share_pct"] = (region_stats["total_revenue"] / region_stat
 print(region_stats)
 print(f"\nTop region by revenue: {region_stats.index[0]}")
 
-#%% Cell 5: Revenue by product
+# %% [5] Cell 5: Revenue by product
 product_stats = (
     df.groupby("product")
     .agg(
@@ -78,7 +78,7 @@ product_stats = (
 print(product_stats)
 print(f"\nTop product by revenue: {product_stats.index[0]}")
 
-#%% Cell 6: Cross-tab — region x product avg price
+# %% [6] Cell 6: Cross-tab — region x product avg price
 cross = df.pivot_table(index="region", columns="product", values="unit_price", aggfunc="mean").round(2)
 print("Average unit price by region x product:")
 print(cross)
@@ -90,7 +90,7 @@ print(f"\nWest Alpha avg price: ${west_alpha:.2f}")
 print(f"Overall Alpha avg price: ${overall_alpha:.2f}")
 print(f"West Alpha premium: {((west_alpha / overall_alpha) - 1) * 100:.1f}%")
 
-#%% Cell 7: Monthly trend
+# %% [7] Cell 7: Monthly trend
 monthly = (
     df.groupby("month")
     .agg(revenue=("revenue", "sum"), orders=("order_id", "count"))
@@ -100,7 +100,7 @@ monthly["month_num"] = range(len(monthly))
 monthly["revenue_per_order"] = monthly["revenue"] / monthly["orders"]
 print(monthly[["month", "revenue", "orders", "revenue_per_order"]])
 
-#%% Cell 8: Correlation analysis
+# %% [8] Cell 8: Correlation analysis
 numeric = df[["units", "unit_price", "discount_pct", "revenue"]].corr().round(3)
 print("Correlation matrix:")
 print(numeric)
@@ -111,7 +111,7 @@ print(f"\nunit_price vs revenue correlation: {price_rev_corr:.3f}")
 print(f"units vs revenue correlation: {units_rev_corr:.3f}")
 print(f"\nStronger driver of revenue: {'units' if units_rev_corr > price_rev_corr else 'unit_price'}")
 
-#%% Cell 9: Final verdict
+# %% [9] Cell 9: Final verdict
 top_region = region_stats.index[0]
 top_product = product_stats.index[0]
 top_combo = (
