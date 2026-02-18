@@ -12,11 +12,16 @@ import glob
 import io
 import json
 import os
+import re
 import signal
 import site
 import sys
 import time
 import traceback
+
+_COMPOUND_KW = re.compile(
+    r';\s*(?=(for|while|if|elif|else|with|try|except|finally|def|class|async|match)\b)'
+)
 
 
 def atomic_write(path, data):
@@ -27,6 +32,26 @@ def atomic_write(path, data):
     os.rename(tmp, path)
 
 
+def _fix_semicolons(code):
+    """Replace ; before compound keywords with newlines (LLM one-liner fix).
+
+    LLM agents often flatten multi-line Python into a single semicolon-separated
+    line, but compound statements (for, if, def, etc.) are illegal after ;.
+    This detects the SyntaxError and splits only at those points, preserving
+    valid semicolons inside loop bodies (e.g. ``for x: a; b; c``).
+    """
+    try:
+        compile(code, "<pyreplab>", "exec")
+        return code
+    except SyntaxError:
+        fixed = _COMPOUND_KW.sub('\n', code)
+        try:
+            compile(fixed, "<pyreplab>", "exec")
+            return fixed
+        except SyntaxError:
+            return code
+
+
 def run_code(code, namespace, max_output=100_000, label=""):
     """Execute code in the persistent namespace, capturing output.
 
@@ -34,6 +59,7 @@ def run_code(code, namespace, max_output=100_000, label=""):
     async polling (returns exit code 2 after its poll timeout, then
     `pyreplab wait` resumes polling until the server writes output).
     """
+    code = _fix_semicolons(code)
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
     error = None
