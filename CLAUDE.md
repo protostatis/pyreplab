@@ -15,6 +15,14 @@ bash test_agent.sh     # 10-step integration test simulating iterative data anal
 
 There is no lint or type-checking configured.
 
+## Publishing
+
+```bash
+uv build && uv publish dist/*
+```
+
+Use `uv` for building and publishing to PyPI (not `python -m build` / `twine`).
+
 ## Architecture
 
 Two main components communicate via file-based IPC (no ports/sockets):
