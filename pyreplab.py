@@ -114,22 +114,31 @@ def _truncate(text, max_chars):
 
 
 def parse_cmd_file(text):
-    """Parse a cmd.py file. First line is '# %% id: xxx cell: label', rest is code."""
+    """Parse a cmd.py file. First line is '# %% id: xxx cwd: /path cell: label', rest is code."""
     lines = text.split("\n")
     cmd_id = ""
+    cmd_cwd = ""
     cell_label = ""
     if lines and (lines[0].startswith("#%%") or lines[0].startswith("# %%")):
         header = lines[0]
         if "id:" in header:
-            id_part = header.split("id:", 1)[1]
-            if "cell:" in id_part:
-                cmd_id = id_part.split("cell:", 1)[0].strip()
-                cell_label = id_part.split("cell:", 1)[1].strip()
+            rest = header.split("id:", 1)[1]
+            # Extract cwd if present
+            if "cwd:" in rest:
+                cmd_id = rest.split("cwd:", 1)[0].strip()
+                rest = rest.split("cwd:", 1)[1]
             else:
-                cmd_id = id_part.strip()
+                cmd_id = rest.strip()
+                rest = ""
+            # Extract cell label if present
+            if "cell:" in rest:
+                cmd_cwd = rest.split("cell:", 1)[0].strip()
+                cell_label = rest.split("cell:", 1)[1].strip()
+            else:
+                cmd_cwd = rest.strip()
         lines = lines[1:]
     code = "\n".join(lines)
-    return code, cmd_id, cell_label
+    return code, cmd_id, cmd_cwd, cell_label
 
 
 def activate_venv(venv_path):
@@ -345,7 +354,14 @@ def main():
 
         os.remove(cmd_path)
 
-        code, cmd_id, cell_label = parse_cmd_file(text)
+        code, cmd_id, cmd_cwd, cell_label = parse_cmd_file(text)
+
+        # Sync working directory and sys.path to caller's cwd
+        if cmd_cwd and os.path.isdir(cmd_cwd):
+            if os.getcwd() != cmd_cwd:
+                os.chdir(cmd_cwd)
+            if cmd_cwd not in sys.path:
+                sys.path.insert(0, cmd_cwd)
 
         stdout, stderr, error = run_code(code, namespace, max_output=args.max_output, label=cell_label)
 

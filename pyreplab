@@ -291,7 +291,7 @@ _send_code() {
     rm -f "$done_path" "$output_path"
 
     # Write cmd.py with #%% cell header (atomic: write tmp, then move)
-    local header="id: $id"
+    local header="id: $id cwd: $(pwd)"
     [ -n "$cell_label" ] && header="$header cell: $cell_label"
     printf '#%%%% %s\n%s\n' "$header" "$code" > "$cmd_path.tmp"
     mv "$cmd_path.tmp" "$cmd_path"
