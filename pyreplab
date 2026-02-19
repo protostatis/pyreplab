@@ -64,6 +64,21 @@ _is_running() {
     [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
 }
 
+# Resolve session with fallback: if cwd-derived session has no running daemon,
+# use the last-started session. Call after _parse_workdir.
+_resolve_session() {
+    if [ -z "${PYREPLAB_DIR:-}" ]; then
+        if ! _is_running && [ -f "$PYREPLAB_BASE/.last_session" ]; then
+            local last_dir
+            last_dir=$(cat "$PYREPLAB_BASE/.last_session")
+            local last_pid="$last_dir/pyreplab.pid"
+            if [ -f "$last_pid" ] && kill -0 "$(cat "$last_pid")" 2>/dev/null; then
+                export PYREPLAB_DIR="$last_dir"
+            fi
+        fi
+    fi
+}
+
 cmd_start() {
     _parse_workdir "$@"
     local dir
@@ -352,18 +367,8 @@ for i, m in enumerate(markers):
 
 cmd_run() {
     # Resolve session from cwd (unless PYREPLAB_DIR is set)
-    if [ -z "${PYREPLAB_DIR:-}" ]; then
-        _parse_workdir
-        # If cwd-derived session has no running daemon, fall back to last-used session
-        if ! _is_running && [ -f "$PYREPLAB_BASE/.last_session" ]; then
-            local last_dir
-            last_dir=$(cat "$PYREPLAB_BASE/.last_session")
-            local last_pid="$last_dir/pyreplab.pid"
-            if [ -f "$last_pid" ] && kill -0 "$(cat "$last_pid")" 2>/dev/null; then
-                export PYREPLAB_DIR="$last_dir"
-            fi
-        fi
-    fi
+    [ -z "${PYREPLAB_DIR:-}" ] && _parse_workdir
+    _resolve_session
     local arg="${1:-}"
     local stamp="${PYREPLAB_STAMP:-1}"
 
@@ -533,14 +538,14 @@ cmd_stop_all() {
 # --- Main dispatch ---
 case "${1:-help}" in
     start)  shift; cmd_start "$@" ;;
-    stop)   shift; _parse_workdir "$@"; cmd_stop ;;
+    stop)   shift; _parse_workdir "$@"; _resolve_session; cmd_stop ;;
     stop-all) cmd_stop_all ;;
-    clean)  shift; _parse_workdir "$@"; cmd_clean ;;
+    clean)  shift; _parse_workdir "$@"; _resolve_session; cmd_clean ;;
     run)    shift; cmd_run "$@" ;;
-    wait)   shift; _parse_workdir "$@"; cmd_wait ;;
+    wait)   shift; _parse_workdir "$@"; _resolve_session; cmd_wait ;;
     cells)  shift; cmd_cells "$@" ;;
-    dir)    shift; _parse_workdir "$@"; cmd_dir ;;
-    status) shift; _parse_workdir "$@"; cmd_status ;;
+    dir)    shift; _parse_workdir "$@"; _resolve_session; cmd_dir ;;
+    status) shift; _parse_workdir "$@"; _resolve_session; cmd_status ;;
     ps|list|ls) cmd_ps ;;
     help|--help|-h)
         echo "Usage: pyreplab <command> [args]"
