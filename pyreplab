@@ -228,7 +228,7 @@ print(cells[idx], end="")
 _wait_for_result() {
     # Poll for command completion and print output.
     # Returns 0 on success, 1 on error output, 2 on timeout (still running).
-    local timeout="${1:-115}"
+    local timeout="${1:-30}"
     local dir
     dir=$(_resolve_dir)
     local done_path="$dir/done"
@@ -289,7 +289,7 @@ _send_code() {
     local done_path="$dir/done"
     local output_path="$dir/output.json"
     local pending_path="$dir/pending_id"
-    local timeout="${PYREPLAB_TIMEOUT:-115}"
+    local timeout="${PYREPLAB_TIMEOUT:-30}"
 
     # Check if server is busy with a previous command
     if [ -f "$pending_path" ]; then
@@ -418,7 +418,6 @@ cmd_run() {
 cmd_wait() {
     local dir
     dir=$(_resolve_dir)
-    local timeout="${PYREPLAB_TIMEOUT:-115}"
 
     if [ ! -f "$dir/pending_id" ]; then
         echo "pyreplab: no command pending" >&2
@@ -432,7 +431,8 @@ cmd_wait() {
         return 1
     fi
 
-    _wait_for_result "$timeout"
+    # Short poll (2s) — return quickly so agents aren't blocked
+    _wait_for_result 2
 }
 
 cmd_dir() {
