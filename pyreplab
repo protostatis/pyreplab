@@ -87,6 +87,8 @@ cmd_start() {
         return 1
     fi
     echo "pyreplab: started (pid $pid, dir $dir)" >&2
+    # Save as last-used session for cross-directory reuse
+    printf '%s' "$dir" > "$PYREPLAB_BASE/.last_session"
 }
 
 cmd_stop() {
@@ -350,7 +352,18 @@ for i, m in enumerate(markers):
 
 cmd_run() {
     # Resolve session from cwd (unless PYREPLAB_DIR is set)
-    [ -z "${PYREPLAB_DIR:-}" ] && _parse_workdir
+    if [ -z "${PYREPLAB_DIR:-}" ]; then
+        _parse_workdir
+        # If cwd-derived session has no running daemon, fall back to last-used session
+        if ! _is_running && [ -f "$PYREPLAB_BASE/.last_session" ]; then
+            local last_dir
+            last_dir=$(cat "$PYREPLAB_BASE/.last_session")
+            local last_pid="$last_dir/pyreplab.pid"
+            if [ -f "$last_pid" ] && kill -0 "$(cat "$last_pid")" 2>/dev/null; then
+                export PYREPLAB_DIR="$last_dir"
+            fi
+        fi
+    fi
     local arg="${1:-}"
     local stamp="${PYREPLAB_STAMP:-1}"
 

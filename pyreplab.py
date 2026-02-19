@@ -304,6 +304,11 @@ def main():
     if final_cwd:
         os.chdir(final_cwd)
 
+    # Ensure cwd is in sys.path so local imports work (like running `python script.py`)
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
+
     # Clean any stale files from a previous run
     cleanup(session_dir)
 
