@@ -65,11 +65,21 @@ def run_code(code, namespace, max_output=100_000, label=""):
     error = None
     filename = f"<pyreplab:{label}>" if label else "<pyreplab>"
 
+    # Reset sys.argv so argparse/click don't see the daemon's args
+    saved_argv = sys.argv
+    sys.argv = [""]
+
     try:
         with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
             exec(compile(code, filename, "exec"), namespace)
+    except SystemExit as e:
+        error = f"SystemExit: code called sys.exit({e.code!r})\nHint: argparse calls sys.exit() on error or --help. Set sys.argv = [''] before using argparse in pyreplab."
+    except KeyboardInterrupt:
+        error = "KeyboardInterrupt"
     except Exception:
         error = traceback.format_exc()
+    finally:
+        sys.argv = saved_argv
 
     stdout = stdout_buf.getvalue()
     stderr = stderr_buf.getvalue()
