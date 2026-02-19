@@ -75,6 +75,8 @@ cmd_start() {
         return 0
     fi
     mkdir -p "$dir"
+    # Clean stale IPC files from a previous (dead) session
+    rm -f "$dir/cmd.py" "$dir/output.json" "$dir/done" "$dir/pending_id"
     python3 "$PYREPLAB_SCRIPT" --session-dir "$dir" "$@" &
     local pid=$!
     echo "$pid" > "$pidfile"
@@ -274,8 +276,13 @@ _send_code() {
 
     # Check if server is busy with a previous command
     if [ -f "$pending_path" ]; then
-        echo "pyreplab: busy running previous command. Run \`pyreplab wait\` first." >&2
-        return 1
+        # If daemon is dead, these are stale files from a previous session — clean up
+        if ! _is_running; then
+            rm -f "$pending_path" "$done_path" "$output_path" "$dir/cmd.py"
+        else
+            echo "pyreplab: busy running previous command. Run \`pyreplab wait\` first." >&2
+            return 1
+        fi
     fi
 
     # Remove stale handshake files
@@ -397,6 +404,13 @@ cmd_wait() {
 
     if [ ! -f "$dir/pending_id" ]; then
         echo "pyreplab: no command pending" >&2
+        return 1
+    fi
+
+    # If daemon is dead, the pending command will never complete — clean up
+    if ! _is_running; then
+        rm -f "$dir/pending_id" "$dir/done" "$dir/output.json" "$dir/cmd.py"
+        echo "pyreplab: server died while command was pending (cleaned up stale files)" >&2
         return 1
     fi
 

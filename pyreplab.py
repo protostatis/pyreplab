@@ -244,7 +244,7 @@ def append_history(session_dir, index, code, stdout, stderr, error):
 
 def cleanup(session_dir):
     """Remove session files on shutdown."""
-    for name in ("cmd.py", "cmd.py.tmp", "output.json", "output.json.tmp", "done"):
+    for name in ("cmd.py", "cmd.py.tmp", "output.json", "output.json.tmp", "done", "pending_id"):
         path = os.path.join(session_dir, name)
         if os.path.exists(path):
             os.remove(path)
