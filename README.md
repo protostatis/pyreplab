@@ -56,6 +56,7 @@ pyreplab <command> [args]
   run                 Read code from stdin
   cells file.py       List cells (stamps [N] indices into file)
   wait                Wait for a running command to finish
+  cancel              Cancel the currently running command
   dir                 Print session directory path
   stop                Stop the current session
   stop-all            Stop all active sessions
@@ -72,7 +73,7 @@ python pyreplab.py [options]
   --session-dir DIR    Session directory (default: /tmp/pyreplab)
   --workdir DIR        Project root for session identity and .venv detection
   --cwd DIR            Working directory for the REPL (defaults to --workdir)
-  --venv PATH          Path to virtualenv (auto-detects .venv/ in workdir)
+  --venv PATH          Path to virtualenv directory itself (e.g. /project/.venv)
   --conda [ENV]        Activate conda env (default: base)
   --no-conda           Disable conda auto-detection
   --timeout SECS       Per-command timeout (default: 30)
@@ -92,7 +93,7 @@ pyreplab start --workdir /project --cwd /project/data/experiment1
 pyreplab run 'import pandas as pd; print(pd.read_csv("local_file.csv").shape)'
 ```
 
-This is useful for data analysts who want to move between folders while keeping the same session and environment.
+When `--cwd` is explicitly set, the working directory is **sticky** — it stays locked to that path for the entire session, regardless of where the caller's shell is when issuing `run` commands. This ensures `import mymodule` keeps working even if you `cd` elsewhere. Without `--cwd`, the daemon syncs its working directory to the caller's shell on each `run`.
 
 ## Async execution
 
@@ -116,6 +117,17 @@ pyreplab run 'print("hi")'
 # exit code 1
 ```
 
+To cancel a running command without killing the session:
+```bash
+pyreplab cancel
+# → pyreplab: cancel signal sent
+# → KeyboardInterrupt
+```
+
+The cancel sends `SIGUSR1` to the daemon, which raises `KeyboardInterrupt` inside the running code. The session stays alive — only the current command is interrupted.
+
+When running a whole file (`pyreplab run file.py`), individual cells that exceed the timeout are automatically waited on before proceeding to the next cell, so all cells run to completion.
+
 Short commands that finish within the timeout window work identically to before — no behavior change.
 
 ## Environment detection
@@ -134,12 +146,14 @@ If a project has a `.venv/`, that always takes precedence over conda. If no `.ve
 ### Virtual environments (venv, uv, virtualenv)
 
 ```bash
-# Auto-detect .venv/ in workdir (most common)
+# Auto-detect .venv/ in workdir (most common — recommended for uv projects)
 pyreplab start --workdir /path/to/project
 
-# Explicit path to any virtualenv
-pyreplab start --venv /path/to/.venv
+# Explicit path — must point to the .venv directory itself, not the project root
+pyreplab start --venv /path/to/project/.venv
 ```
+
+**Note:** `--venv` expects the path to the virtualenv directory (containing `lib/pythonX.Y/site-packages/`), not the project directory. To point at a project and have `.venv/` auto-detected, use `--workdir` instead.
 
 Works with `uv venv`, `python -m venv`, or any standard virtualenv.
 

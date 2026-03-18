@@ -71,12 +71,13 @@ pyreplab run 'print(df.columns.tolist())'
 
 ```
 pyreplab start --workdir DIR    Start session (auto-detects .venv/)
-pyreplab start --workdir DIR --cwd DIR   Start with separate working directory
+pyreplab start --workdir DIR --cwd DIR   Start with separate working directory (locks cwd for imports)
 pyreplab run file.py:N          Run cell N (stamps [N] indices into file)
 pyreplab run file.py            Run all cells (stamps [N] indices into file)
 pyreplab run 'code'             Run inline code
 pyreplab cells file.py          List cells (stamps [N], peeks comments for labels)
 pyreplab wait                   Wait for a long-running command to finish
+pyreplab cancel                 Cancel the currently running command
 pyreplab dir                    Print session directory path
 pyreplab status                 Check if REPL is running (idle/executing)
 pyreplab ps                     Show active sessions
@@ -84,7 +85,7 @@ pyreplab stop                   Stop current session
 pyreplab stop-all               Stop all sessions
 ```
 
-Long-running commands return early with exit code 2 and a "still running" message. Use `pyreplab wait` to resume polling. If you get "busy running previous command", run `pyreplab wait` first before submitting new code.
+Long-running commands return early with exit code 2 and a "still running" message. Use `pyreplab wait` to resume polling. If you get "busy running previous command", run `pyreplab wait` first before submitting new code. To abort a stuck or unwanted command, use `pyreplab cancel` — it interrupts the running code without killing the session.
 
 ## Rules
 

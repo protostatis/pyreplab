@@ -19,6 +19,8 @@ import sys
 import time
 import traceback
 
+_executing = False  # True while exec() is running; used by SIGUSR1 cancel handler
+
 _COMPOUND_KW = re.compile(
     r';\s*(?=(for|while|if|elif|else|with|try|except|finally|def|class|async|match)\b)'
 )
@@ -263,7 +265,7 @@ def append_history(session_dir, index, code, stdout, stderr, error):
 
 def cleanup(session_dir):
     """Remove session files on shutdown."""
-    for name in ("cmd.py", "cmd.py.tmp", "output.json", "output.json.tmp", "done", "pending_id"):
+    for name in ("cmd.py", "cmd.py.tmp", "output.json", "output.json.tmp", "done", "pending_id", "pending_start"):
         path = os.path.join(session_dir, name)
         if os.path.exists(path):
             os.remove(path)
@@ -274,7 +276,7 @@ def main():
     parser.add_argument("--session-dir", default="/tmp/pyreplab", help="Session directory (default: /tmp/pyreplab)")
     parser.add_argument("--workdir", default=None, help="Project root for session identity and .venv detection")
     parser.add_argument("--cwd", default=None, help="Working directory for the REPL (defaults to --workdir)")
-    parser.add_argument("--venv", default=None, help="Path to virtualenv to activate (auto-detects .venv/ in workdir)")
+    parser.add_argument("--venv", default=None, help="Path to virtualenv directory (e.g. /project/.venv). Use --workdir to auto-detect .venv/")
     parser.add_argument("--conda", default=None, nargs="?", const="base",
                         help="Activate conda env (default: base). Use --conda for base, --conda envname for a named env")
     parser.add_argument("--no-conda", action="store_true", help="Disable conda auto-detection")
@@ -318,6 +320,9 @@ def main():
         if conda_base:
             activate_venv(conda_base)
 
+    # When --cwd is explicit, lock the working directory so per-command sync is skipped
+    cwd_locked = args.cwd is not None
+
     # Set working directory: --cwd overrides --workdir
     final_cwd = args.cwd or args.workdir
     if final_cwd:
@@ -347,6 +352,12 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+    def cancel_handler(signum, frame):
+        if _executing:
+            raise KeyboardInterrupt("Cancelled by pyreplab cancel")
+
+    signal.signal(signal.SIGUSR1, cancel_handler)
+
     print(f"pyreplab: python {sys.version.split()[0]} ({sys.executable})", file=sys.stderr)
     print(f"pyreplab: listening on {session_dir} (poll={args.poll_interval}s)", file=sys.stderr)
 
@@ -366,14 +377,19 @@ def main():
 
         code, cmd_id, cmd_cwd, cell_label = parse_cmd_file(text)
 
-        # Sync working directory and sys.path to caller's cwd
-        if cmd_cwd and os.path.isdir(cmd_cwd):
+        # Sync working directory and sys.path to caller's cwd (skip if --cwd locked it)
+        if not cwd_locked and cmd_cwd and os.path.isdir(cmd_cwd):
             if os.getcwd() != cmd_cwd:
                 os.chdir(cmd_cwd)
             if cmd_cwd not in sys.path:
                 sys.path.insert(0, cmd_cwd)
 
-        stdout, stderr, error = run_code(code, namespace, max_output=args.max_output, label=cell_label)
+        global _executing
+        _executing = True
+        try:
+            stdout, stderr, error = run_code(code, namespace, max_output=args.max_output, label=cell_label)
+        finally:
+            _executing = False
 
         append_history(session_dir, exec_index, code, stdout, stderr, error)
         exec_index += 1

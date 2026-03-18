@@ -46,6 +46,7 @@ This shows every command that was executed and its output — tells you what's l
 - Data persists between cells — no reloading needed.
 - Always print() results — the REPL only captures stdout.
 - If something errors, the session survives. Fix and re-run.
+- If a command is stuck, run `{PYREPLAB_PATH} cancel` to interrupt it without killing the session.
 - If you lose context, run `cat "$({PYREPLAB_PATH} dir)/history.md"` before doing anything else.
 ```
 

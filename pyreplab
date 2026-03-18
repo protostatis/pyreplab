@@ -9,6 +9,7 @@
 #   pyreplab run < script.py       Read from stdin
 #   pyreplab cells notebook.py     List cells (stamps [N], peeks comments)
 #   pyreplab wait                  Wait for a running command to finish
+#   pyreplab cancel                Cancel the currently running command
 #   pyreplab status                Check if REPL is running
 #   pyreplab ps                    List all active sessions
 #   pyreplab stop / stop-all       Stop session(s)
@@ -91,7 +92,7 @@ cmd_start() {
     fi
     mkdir -p "$dir"
     # Clean stale IPC files from a previous (dead) session
-    rm -f "$dir/cmd.py" "$dir/output.json" "$dir/done" "$dir/pending_id"
+    rm -f "$dir/cmd.py" "$dir/output.json" "$dir/done" "$dir/pending_id" "$dir/pending_start"
     python3 "$PYREPLAB_SCRIPT" --session-dir "$dir" "$@" &
     local pid=$!
     echo "$pid" > "$pidfile"
@@ -130,7 +131,7 @@ cmd_stop() {
 cmd_clean() {
     local dir
     dir=$(_resolve_dir)
-    for f in cmd.py cmd.py.tmp output.json output.json.tmp done pending_id; do
+    for f in cmd.py cmd.py.tmp output.json output.json.tmp done pending_id pending_start; do
         [ -f "$dir/$f" ] && rm -f "$dir/$f"
     done
     echo "pyreplab: cleaned session files in $dir" >&2
@@ -235,13 +236,21 @@ _wait_for_result() {
     local output_path="$dir/output.json"
     local pending_path="$dir/pending_id"
 
+    # Read submission timestamp for total elapsed reporting
+    local start_time=""
+    [ -f "$dir/pending_start" ] && start_time=$(cat "$dir/pending_start")
+
     # Poll for completion
     local elapsed=0
     while [ ! -f "$done_path" ]; do
         sleep 0.1
         elapsed=$((elapsed + 1))
         if [ "$elapsed" -ge "$((timeout * 10))" ]; then
-            echo "pyreplab: still running (${timeout}s elapsed). Run \`pyreplab wait\` to check again." >&2
+            local total="${timeout}s"
+            if [ -n "$start_time" ]; then
+                total="$(( $(date +%s) - start_time ))s"
+            fi
+            echo "pyreplab: still running (${total} elapsed). Run \`pyreplab wait\` to check again." >&2
             return 2
         fi
     done
@@ -254,11 +263,11 @@ _wait_for_result() {
     result=$(cat "$output_path" 2>/dev/null) || true
     if [ -z "$result" ]; then
         echo "pyreplab: no output received" >&2
-        rm -f "$pending_path"
+        rm -f "$pending_path" "$dir/pending_start"
         return 1
     fi
     rm -f "$output_path"
-    rm -f "$pending_path"
+    rm -f "$pending_path" "$dir/pending_start"
 
     # Parse JSON and print (single python3 call)
     printf '%s' "$result" | python3 -c '
@@ -295,7 +304,7 @@ _send_code() {
     if [ -f "$pending_path" ]; then
         # If daemon is dead, these are stale files from a previous session — clean up
         if ! _is_running; then
-            rm -f "$pending_path" "$done_path" "$output_path" "$dir/cmd.py"
+            rm -f "$pending_path" "$done_path" "$output_path" "$dir/cmd.py" "$dir/pending_start"
         else
             echo "pyreplab: busy running previous command. Run \`pyreplab wait\` first." >&2
             return 1
@@ -311,8 +320,9 @@ _send_code() {
     printf '#%%%% %s\n%s\n' "$header" "$code" > "$cmd_path.tmp"
     mv "$cmd_path.tmp" "$cmd_path"
 
-    # Track pending command
+    # Track pending command and start time
     printf '%s' "$id" > "$pending_path"
+    date +%s > "$dir/pending_start"
 
     # Wait for result
     _wait_for_result "$timeout"
@@ -395,7 +405,19 @@ cmd_run() {
             if [ -z "$code" ]; then
                 continue
             fi
-            _send_code "$code" "$base:$i" || return $?
+            _send_code "$code" "$base:$i"
+            local rc=$?
+            if [ "$rc" -eq 2 ]; then
+                # Cell timed out — keep waiting so remaining cells can run
+                while true; do
+                    _wait_for_result 30
+                    rc=$?
+                    [ "$rc" -ne 2 ] && break
+                done
+            fi
+            if [ "$rc" -eq 1 ]; then
+                return 1
+            fi
         done
     elif [[ "$arg" == *:* ]] && [ -f "${arg%%:*}" ]; then
         # pyreplab run file.py:N — stamp cells, then run cell N
@@ -426,13 +448,37 @@ cmd_wait() {
 
     # If daemon is dead, the pending command will never complete — clean up
     if ! _is_running; then
-        rm -f "$dir/pending_id" "$dir/done" "$dir/output.json" "$dir/cmd.py"
+        rm -f "$dir/pending_id" "$dir/pending_start" "$dir/done" "$dir/output.json" "$dir/cmd.py"
         echo "pyreplab: server died while command was pending (cleaned up stale files)" >&2
         return 1
     fi
 
     # Short poll (2s) — return quickly so agents aren't blocked
     _wait_for_result 2
+}
+
+cmd_cancel() {
+    local dir
+    dir=$(_resolve_dir)
+    local pidfile="$dir/pyreplab.pid"
+
+    if ! [ -f "$pidfile" ] || ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+        echo "pyreplab: not running" >&2
+        return 1
+    fi
+
+    if [ ! -f "$dir/pending_id" ]; then
+        echo "pyreplab: no command running" >&2
+        return 0
+    fi
+
+    local pid
+    pid=$(cat "$pidfile")
+    kill -USR1 "$pid" 2>/dev/null
+    echo "pyreplab: cancel signal sent" >&2
+
+    # Wait briefly for the daemon to finish processing the cancellation
+    _wait_for_result 5
 }
 
 cmd_dir() {
@@ -447,7 +493,13 @@ cmd_status() {
     local pidfile="$dir/pyreplab.pid"
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
         local state="idle"
-        [ -f "$dir/pending_id" ] && state="executing command"
+        if [ -f "$dir/pending_id" ]; then
+            state="executing command"
+            if [ -f "$dir/pending_start" ]; then
+                local elapsed=$(( $(date +%s) - $(cat "$dir/pending_start") ))
+                state="executing command (${elapsed}s elapsed)"
+            fi
+        fi
         echo "pyreplab: running (pid $(cat "$pidfile"), dir $dir), $state"
     else
         echo "pyreplab: not running"
@@ -543,6 +595,7 @@ case "${1:-help}" in
     clean)  shift; _parse_workdir "$@"; _resolve_session; cmd_clean ;;
     run)    shift; cmd_run "$@" ;;
     wait)   shift; _parse_workdir "$@"; _resolve_session; cmd_wait ;;
+    cancel) shift; _parse_workdir "$@"; _resolve_session; cmd_cancel ;;
     cells)  shift; cmd_cells "$@" ;;
     dir)    shift; _parse_workdir "$@"; _resolve_session; cmd_dir ;;
     status) shift; _parse_workdir "$@"; _resolve_session; cmd_status ;;
@@ -558,6 +611,7 @@ case "${1:-help}" in
         echo "  run                 Read code from stdin"
         echo "  cells file.py       List cells (stamps [N] indices into file)"
         echo "  wait                Wait for a running command to finish"
+        echo "  cancel              Cancel the currently running command"
         echo "  stop                Stop the current session"
         echo "  stop-all            Stop all active sessions"
         echo "  dir                 Print session directory path"
