@@ -410,6 +410,7 @@ cmd_run() {
             if [ "$rc" -eq 2 ]; then
                 # Cell timed out — keep waiting so remaining cells can run
                 while true; do
+                    rc=0
                     _wait_for_result 30 || rc=$?
                     [ "$rc" -ne 2 ] && break
                 done
