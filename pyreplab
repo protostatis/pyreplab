@@ -393,14 +393,18 @@ cmd_run() {
         _send_code "$code" ""
     elif [ -f "$arg" ]; then
         # pyreplab run file.py — stamp cells, then run each individually
+        local dir
+        dir=$(_resolve_dir)
+        if [ -f "$dir/pending_notebook" ]; then
+            echo "pyreplab: a notebook is already mid-run ($(basename "$(cat "$dir/pending_notebook")")). Run \`pyreplab wait\` to finish it first." >&2
+            return 1
+        fi
         [ "$stamp" = "1" ] && _stamp_cells "$arg"
         local base file_abs
         base="$(basename "$arg")"
         file_abs="$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")"
         local cell_count
         cell_count=$(_count_cells "$arg")
-        local dir
-        dir=$(_resolve_dir)
         local i
         for ((i=0; i<cell_count; i++)); do
             local code

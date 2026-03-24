@@ -102,20 +102,20 @@ for p in pcts:
     print(f"  P{p:<3} = {res_sorted[idx]:>+8.2f}")
 
 # %% [5] Final summary
-try:
-    print("=" * 50)
-    print("PIPELINE COMPLETE — all cells executed")
-    print("=" * 50)
-    print(f"  Records:    {len(data)}")
-    print(f"  Groups:     {len(stats)} ({', '.join(sorted(stats.keys()))})")
-    print(f"  Outliers:   {len(outliers)} ({len(outliers)/len(data)*100:.2f}%)")
-    print(f"  Model RMSE: {rmse:.4f}")
-    print(f"  Model R²:   {r_squared:.6f}")
-    print(f"  Slope:      {slope:.8f}")
-    print()
-    print("Group summary:")
-    for g in sorted(stats):
-        s = stats[g]
-        print(f"    {g}: mean={s['mean']:.2f} std={s['std']:.2f} n={s['n']}")
-except NameError as e:
-    print(f"FAILED — missing variable: {e}")
+# All variables below (data, stats, outliers, rmse, r_squared, slope) are
+# defined in cells 0-4. If any cell failed, the run would have exited with
+# rc=1 before reaching here, so these are guaranteed to exist.
+print("=" * 50)
+print("PIPELINE COMPLETE — all cells executed")
+print("=" * 50)
+print(f"  Records:    {len(data)}")
+print(f"  Groups:     {len(stats)} ({', '.join(sorted(stats.keys()))})")
+print(f"  Outliers:   {len(outliers)} ({len(outliers)/len(data)*100:.2f}%)")
+print(f"  Model RMSE: {rmse:.4f}")
+print(f"  Model R²:   {r_squared:.6f}")
+print(f"  Slope:      {slope:.8f}")
+print()
+print("Group summary:")
+for g in sorted(stats):
+    s = stats[g]
+    print(f"    {g}: mean={s['mean']:.2f} std={s['std']:.2f} n={s['n']}")
