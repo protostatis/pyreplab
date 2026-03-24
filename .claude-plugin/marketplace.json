@@ -1,0 +1,25 @@
+{
+  "name": "pyreplab-marketplace",
+  "owner": {
+    "name": "Proto Statis",
+    "email": "protostatis.dev@gmail.com"
+  },
+  "metadata": {
+    "description": "Persistent Python REPL plugin for Claude Code",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "pyreplab",
+      "source": ".",
+      "description": "Run Python code in a persistent REPL that preserves state across cells",
+      "version": "0.4.2",
+      "author": { "name": "Proto Statis" },
+      "homepage": "https://github.com/protostatis/pyreplab",
+      "repository": "https://github.com/protostatis/pyreplab",
+      "license": "MIT",
+      "keywords": ["repl", "python", "persistent", "llm"],
+      "category": "developer-tools"
+    }
+  ]
+}

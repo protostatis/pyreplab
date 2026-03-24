@@ -1,0 +1,13 @@
+{
+  "name": "pyreplab",
+  "version": "0.4.2",
+  "description": "Persistent Python REPL for LLM CLI tools — run Python cells with state preserved across commands, zero dependencies",
+  "author": {
+    "name": "Proto Statis",
+    "url": "https://github.com/protostatis"
+  },
+  "homepage": "https://github.com/protostatis/pyreplab",
+  "repository": "https://github.com/protostatis/pyreplab",
+  "license": "MIT",
+  "keywords": ["repl", "python", "persistent", "llm", "notebook", "data-analysis"]
+}
