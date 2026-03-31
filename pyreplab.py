@@ -126,11 +126,16 @@ def _truncate(text, max_chars):
 
 
 def parse_cmd_file(text):
-    """Parse a cmd.py file. First line is '# %% id: xxx cwd: /path cell: label', rest is code."""
+    """Parse a cmd.py file. First line is '# %% id: xxx cwd: /path cell: label', rest is code.
+
+    Returns (code, cmd_id, cmd_cwd, cell_label, notebook_path).
+    When notebook_path is set, the daemon should read that file and execute all cells.
+    """
     lines = text.split("\n")
     cmd_id = ""
     cmd_cwd = ""
     cell_label = ""
+    notebook_path = ""
     if lines and (lines[0].startswith("#%%") or lines[0].startswith("# %%")):
         header = lines[0]
         if "id:" in header:
@@ -142,15 +147,27 @@ def parse_cmd_file(text):
             else:
                 cmd_id = rest.strip()
                 rest = ""
+            # Extract notebook path if present (server-side multi-cell execution)
+            if "notebook:" in rest:
+                cmd_cwd = rest.split("notebook:", 1)[0].strip()
+                notebook_path = rest.split("notebook:", 1)[1].strip()
             # Extract cell label if present
-            if "cell:" in rest:
+            elif "cell:" in rest:
                 cmd_cwd = rest.split("cell:", 1)[0].strip()
                 cell_label = rest.split("cell:", 1)[1].strip()
             else:
                 cmd_cwd = rest.strip()
         lines = lines[1:]
     code = "\n".join(lines)
-    return code, cmd_id, cmd_cwd, cell_label
+    return code, cmd_id, cmd_cwd, cell_label, notebook_path
+
+
+def _split_notebook(text):
+    """Split a .py notebook into cells based on # %% markers."""
+    parts = re.split(r"(?m)^# ?%%[^\n]*\n", text)
+    if re.match(r"# ?%%", text):
+        return parts[1:]  # skip empty first split before first marker
+    return parts
 
 
 def activate_venv(venv_path):
@@ -375,7 +392,7 @@ def main():
 
         os.remove(cmd_path)
 
-        code, cmd_id, cmd_cwd, cell_label = parse_cmd_file(text)
+        code, cmd_id, cmd_cwd, cell_label, notebook_path = parse_cmd_file(text)
 
         # Sync working directory and sys.path to caller's cwd (skip if --cwd locked it)
         if not cwd_locked and cmd_cwd and os.path.isdir(cmd_cwd):
@@ -385,25 +402,79 @@ def main():
                 sys.path.insert(0, cmd_cwd)
 
         global _executing
-        _executing = True
-        try:
-            stdout, stderr, error = run_code(code, namespace, max_output=args.max_output, label=cell_label)
-        finally:
-            _executing = False
 
-        append_history(session_dir, exec_index, code, stdout, stderr, error)
-        exec_index += 1
+        if notebook_path:
+            # Server-side notebook execution: read file, split cells, run all sequentially
+            try:
+                with open(notebook_path) as f:
+                    nb_text = f.read()
+            except IOError as e:
+                atomic_write(output_path, {
+                    "stdout": "", "stderr": "",
+                    "error": f"pyreplab: cannot read notebook: {e}",
+                    "id": cmd_id,
+                })
+                with open(done_path, "w") as f:
+                    f.write(cmd_id)
+                continue
 
-        atomic_write(output_path, {
-            "stdout": stdout,
-            "stderr": stderr,
-            "error": error,
-            "id": cmd_id,
-        })
+            cells = _split_notebook(nb_text)
+            nb_base = os.path.basename(notebook_path)
+            all_stdout = []
+            all_stderr = []
+            error = None
 
-        # Signal completion
-        with open(done_path, "w") as f:
-            f.write(cmd_id)
+            for i, cell_code in enumerate(cells):
+                if not cell_code.strip():
+                    continue
+                _executing = True
+                try:
+                    stdout, stderr, err = run_code(
+                        cell_code, namespace,
+                        max_output=args.max_output,
+                        label=f"{nb_base}:{i}",
+                    )
+                finally:
+                    _executing = False
+
+                all_stdout.append(stdout)
+                all_stderr.append(stderr)
+                append_history(session_dir, exec_index, cell_code, stdout, stderr, err)
+                exec_index += 1
+
+                if err:
+                    error = f"[cell {nb_base}:{i}] {err}"
+                    break
+
+            atomic_write(output_path, {
+                "stdout": "".join(all_stdout),
+                "stderr": "".join(all_stderr),
+                "error": error,
+                "id": cmd_id,
+            })
+            with open(done_path, "w") as f:
+                f.write(cmd_id)
+        else:
+            # Single command execution
+            _executing = True
+            try:
+                stdout, stderr, error = run_code(code, namespace, max_output=args.max_output, label=cell_label)
+            finally:
+                _executing = False
+
+            append_history(session_dir, exec_index, code, stdout, stderr, error)
+            exec_index += 1
+
+            atomic_write(output_path, {
+                "stdout": stdout,
+                "stderr": stderr,
+                "error": error,
+                "id": cmd_id,
+            })
+
+            # Signal completion
+            with open(done_path, "w") as f:
+                f.write(cmd_id)
 
     cleanup(session_dir)
     print("pyreplab: shutdown", file=sys.stderr)

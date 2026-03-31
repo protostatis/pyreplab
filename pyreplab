@@ -92,7 +92,7 @@ cmd_start() {
     fi
     mkdir -p "$dir"
     # Clean stale IPC files from a previous (dead) session
-    rm -f "$dir/cmd.py" "$dir/output.json" "$dir/done" "$dir/pending_id" "$dir/pending_start" "$dir/pending_notebook" "$dir/pending_cell_idx" "$dir/pending_cell_count"
+    rm -f "$dir/cmd.py" "$dir/output.json" "$dir/done" "$dir/pending_id" "$dir/pending_start"
     python3 "$PYREPLAB_SCRIPT" --session-dir "$dir" "$@" &
     local pid=$!
     echo "$pid" > "$pidfile"
@@ -131,7 +131,7 @@ cmd_stop() {
 cmd_clean() {
     local dir
     dir=$(_resolve_dir)
-    for f in cmd.py cmd.py.tmp output.json output.json.tmp done pending_id pending_start pending_notebook pending_cell_idx pending_cell_count; do
+    for f in cmd.py cmd.py.tmp output.json output.json.tmp done pending_id pending_start; do
         [ -f "$dir/$f" ] && rm -f "$dir/$f"
     done
     echo "pyreplab: cleaned session files in $dir" >&2
@@ -328,6 +328,43 @@ _send_code() {
     _wait_for_result "$timeout"
 }
 
+_send_notebook() {
+    # Send a notebook path to the daemon for server-side multi-cell execution.
+    # The daemon reads the file, splits cells, and runs them all sequentially.
+    local notebook_abs="$1"
+    local dir
+    dir=$(_resolve_dir)
+    local id
+    id="cmd_$$_$(date +%s%N 2>/dev/null || echo $RANDOM)"
+    local cmd_path="$dir/cmd.py"
+    local done_path="$dir/done"
+    local output_path="$dir/output.json"
+    local pending_path="$dir/pending_id"
+    local timeout="${PYREPLAB_TIMEOUT:-30}"
+
+    # Check if server is busy with a previous command
+    if [ -f "$pending_path" ]; then
+        if ! _is_running; then
+            rm -f "$pending_path" "$done_path" "$output_path" "$dir/cmd.py" "$dir/pending_start"
+        else
+            echo "pyreplab: busy running previous command. Run \`pyreplab wait\` first." >&2
+            return 1
+        fi
+    fi
+
+    rm -f "$done_path" "$output_path"
+
+    # Write cmd.py with notebook header (no code body — daemon reads the file)
+    local header="id: $id cwd: $(pwd) notebook: $notebook_abs"
+    printf '#%%%% %s\n' "$header" > "$cmd_path.tmp"
+    mv "$cmd_path.tmp" "$cmd_path"
+
+    printf '%s' "$id" > "$pending_path"
+    date +%s > "$dir/pending_start"
+
+    _wait_for_result "$timeout"
+}
+
 cmd_cells() {
     local file="${1:-}"
     if [ -z "$file" ] || ! [ -f "$file" ]; then
@@ -392,39 +429,11 @@ cmd_run() {
         fi
         _send_code "$code" ""
     elif [ -f "$arg" ]; then
-        # pyreplab run file.py — stamp cells, then run each individually
-        local dir
-        dir=$(_resolve_dir)
-        if [ -f "$dir/pending_notebook" ]; then
-            echo "pyreplab: a notebook is already mid-run ($(basename "$(cat "$dir/pending_notebook")")). Run \`pyreplab wait\` to finish it first." >&2
-            return 1
-        fi
+        # pyreplab run file.py — stamp cells, send notebook to daemon for server-side execution
         [ "$stamp" = "1" ] && _stamp_cells "$arg"
-        local base file_abs
-        base="$(basename "$arg")"
+        local file_abs
         file_abs="$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")"
-        local cell_count
-        cell_count=$(_count_cells "$arg")
-        local i
-        for ((i=0; i<cell_count; i++)); do
-            local code
-            code=$(_extract_cell "$arg" "$i")
-            if [ -z "$code" ]; then
-                continue
-            fi
-            local rc=0
-            _send_code "$code" "$base:$i" || rc=$?
-            if [ "$rc" -eq 2 ]; then
-                # Cell timed out — save notebook state so `wait` can continue
-                printf '%s' "$file_abs" > "$dir/pending_notebook"
-                printf '%s' "$i" > "$dir/pending_cell_idx"
-                printf '%s' "$cell_count" > "$dir/pending_cell_count"
-                return 2
-            fi
-            if [ "$rc" -eq 1 ]; then
-                return 1
-            fi
-        done
+        _send_notebook "$file_abs"
     elif [[ "$arg" == *:* ]] && [ -f "${arg%%:*}" ]; then
         # pyreplab run file.py:N — stamp cells, then run cell N
         local file="${arg%%:*}"
@@ -455,56 +464,12 @@ cmd_wait() {
     # If daemon is dead, the pending command will never complete — clean up
     if ! _is_running; then
         rm -f "$dir/pending_id" "$dir/pending_start" "$dir/done" "$dir/output.json" "$dir/cmd.py"
-        rm -f "$dir/pending_notebook" "$dir/pending_cell_idx" "$dir/pending_cell_count"
         echo "pyreplab: server died while command was pending (cleaned up stale files)" >&2
         return 1
     fi
 
     # Short poll (2s) — return quickly so agents aren't blocked
-    local rc=0
-    _wait_for_result 2 || rc=$?
-
-    if [ "$rc" -eq 2 ]; then
-        return 2
-    fi
-
-    if [ "$rc" -eq 1 ]; then
-        rm -f "$dir/pending_notebook" "$dir/pending_cell_idx" "$dir/pending_cell_count"
-        return 1
-    fi
-
-    # Cell finished. If this is a notebook run, continue to the next cell.
-    if [ -f "$dir/pending_notebook" ]; then
-        local notebook cell_idx cell_count
-        notebook=$(cat "$dir/pending_notebook")
-        cell_idx=$(cat "$dir/pending_cell_idx")
-        cell_count=$(cat "$dir/pending_cell_count")
-        local base
-        base="$(basename "$notebook")"
-        local i
-        for ((i=cell_idx + 1; i<cell_count; i++)); do
-            local code
-            code=$(_extract_cell "$notebook" "$i")
-            if [ -z "$code" ]; then
-                continue
-            fi
-            rc=0
-            _send_code "$code" "$base:$i" || rc=$?
-            if [ "$rc" -eq 2 ]; then
-                # Next cell also timed out — update state, return 2
-                printf '%s' "$i" > "$dir/pending_cell_idx"
-                return 2
-            fi
-            if [ "$rc" -eq 1 ]; then
-                rm -f "$dir/pending_notebook" "$dir/pending_cell_idx" "$dir/pending_cell_count"
-                return 1
-            fi
-        done
-        # All cells done
-        rm -f "$dir/pending_notebook" "$dir/pending_cell_idx" "$dir/pending_cell_count"
-    fi
-
-    return 0
+    _wait_for_result 2
 }
 
 cmd_cancel() {
