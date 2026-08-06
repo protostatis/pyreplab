@@ -20,12 +20,23 @@
 set -euo pipefail
 
 PYREPLAB_BASE="${PYREPLAB_BASE:-/tmp/pyreplab}"
+# Prefer the python next to this script (uv tool installs place both the
+# script and the venv python in bin/); fall back to PATH python3 for
+# repo/dev installs.
+if [ -x "$(cd "$(dirname "$0")" && pwd)/python" ]; then
+    PYREPLAB_PYTHON="$(cd "$(dirname "$0")" && pwd)/python"
+else
+    PYREPLAB_PYTHON="python3"
+fi
 if [ -n "${PYREPLAB_SCRIPT:-}" ]; then
     :
 elif [ -f "$(cd "$(dirname "$0")" && pwd)/pyreplab.py" ]; then
     PYREPLAB_SCRIPT="$(cd "$(dirname "$0")" && pwd)/pyreplab.py"
 else
-    PYREPLAB_SCRIPT="$(python3 -c 'import pyreplab; print(pyreplab.__file__)')"
+    # uv tool installs put pyreplab.py in the venv's site-packages: the
+    # venv's own python (adjacent to this script) can import it, while a
+    # PATH python3 usually cannot
+    PYREPLAB_SCRIPT="$("$PYREPLAB_PYTHON" -c 'import pyreplab; print(pyreplab.__file__)' 2>/dev/null)" || PYREPLAB_SCRIPT=""
 fi
 
 # Discover the project root for a directory: nearest ancestor with .git,
@@ -171,7 +182,11 @@ cmd_start() {
         daemon_args+=(--cwd "$cwd")
     fi
     daemon_args+=("${rest[@]}")
-    nohup python3 "$PYREPLAB_SCRIPT" "${daemon_args[@]}" >"$dir/daemon.log" 2>&1 </dev/null &
+    if [ -z "$PYREPLAB_SCRIPT" ]; then
+        echo "pyreplab: cannot locate pyreplab.py — reinstall, or set PYREPLAB_SCRIPT" >&2
+        return 1
+    fi
+    nohup "$PYREPLAB_PYTHON" "$PYREPLAB_SCRIPT" "${daemon_args[@]}" >"$dir/daemon.log" 2>&1 </dev/null &
     local pid=$!
     disown "$pid" 2>/dev/null || true
     echo "$pid" > "$pidfile"
