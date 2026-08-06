@@ -327,10 +327,20 @@ def _reexec_under_env(env_path):
 
     site.addsitedir() alone leaves the daemon running under whatever python
     the bash launcher found on PATH; if that version differs from the env's,
-    compiled extensions (numpy/pandas/...) fail with cryptic errors. Re-exec
-    makes interpreter, site-packages and .pyc caches consistent. Guarded by a
-    realpath comparison so it cannot loop (symlinked env pythons resolve to
-    the same real path on the second pass).
+    compiled extensions (numpy/pandas/...) fail with cryptic errors, and for
+    a real venv sys.executable/sys.prefix point at the base interpreter
+    instead of the venv. Re-exec makes interpreter, site-packages, sys.prefix
+    and .pyc caches consistent.
+
+    Loop guard: a venv's bin/python is a symlink to the same base binary, so
+    the binary realpaths match even when the daemon was launched with the base
+    interpreter. Two cases:
+    - Real venv (pyvenv.cfg present): sys.prefix distinguishes "already in the
+      venv" from "same binary, outside the venv" — only skip when both the
+      binary and sys.prefix match the env.
+    - Non-venv env (conda/pixi dirs, fake venvs in tests, no pyvenv.cfg):
+      sys.prefix never changes, so re-exec would loop forever; skip when the
+      binary matches (re-exec only matters there for version consistency).
     """
     bin_dir = os.path.join(env_path, "bin")
     if not os.path.isdir(bin_dir):
@@ -339,9 +349,15 @@ def _reexec_under_env(env_path):
     if not os.path.isfile(env_python):
         return
     try:
-        if os.path.realpath(env_python) == os.path.realpath(sys.executable):
-            return
+        same_binary = os.path.realpath(env_python) == os.path.realpath(sys.executable)
+        is_real_venv = os.path.isfile(os.path.join(env_path, "pyvenv.cfg"))
+        already_under_env = (
+            same_binary
+            and (not is_real_venv or os.path.realpath(sys.prefix) == os.path.realpath(env_path))
+        )
     except OSError:
+        return
+    if already_under_env:
         return
     print(f"pyreplab: re-executing under {env_python}", file=sys.stderr)
     os.execv(env_python, [env_python] + sys.argv)
