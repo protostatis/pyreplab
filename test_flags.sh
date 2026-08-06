@@ -231,6 +231,41 @@ grep -q "activated venv" "$log" 2>/dev/null \
 
 # ---------------------------------------------------------
 echo ""
+echo "== T7b same-binary real venv (pyvenv.cfg): --venv runs under the venv python =="
+rm -rf "$BASE/envroot/.venv" "$BASE/envroot/.pixi"
+fakevenv="$BASE/envroot/.venv"
+mkdir -p "$fakevenv/bin" "$fakevenv/lib/python3.99/site-packages"
+ln -sf "$(command -v python3)" "$fakevenv/bin/python"
+# A venv's bin/python is a symlink to the base interpreter; pyvenv.cfg makes
+# CPython treat it as a real venv. Regression: the old re-exec guard compared
+# only binary realpaths, so a venv created from the same python3 as the
+# pyreplab launcher was never re-exec'd into — sys.executable stayed at the
+# launcher's python instead of the venv's.
+base_py="$(realpath "$(command -v python3)")"
+base_bin="$(dirname "$base_py")"
+version=$("$base_py" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')
+printf 'home = %s\nversion = %s\ninclude-system-site-packages = false\nexecutable = %s\n' \
+    "$base_bin" "$version" "$base_py" > "$fakevenv/pyvenv.cfg"
+pid=$(new_session "$BASE/envroot/sub" --venv "$fakevenv")
+[ -n "$pid" ] && check "same-binary venv session started" ok || check "same-binary venv session started" fail "no pid"
+out=$(cd "$BASE/envroot/sub" && "$PR" run 'import sys; print(sys.executable); print(sys.prefix); print(sys.base_prefix)')
+exec_py=$(printf '%s' "$out" | sed -n '1p')
+pref=$(printf '%s' "$out" | sed -n '2p')
+base=$(printf '%s' "$out" | sed -n '3p')
+[ "$exec_py" = "$fakevenv/bin/python" ] \
+    && check "run executes under the venv python, not the launcher's python3" ok \
+    || check "run executes under the venv python, not the launcher's python3" fail "executable=$exec_py"
+[ "$pref" = "$fakevenv" ] && [ "$pref" != "$base" ] \
+    && check "sys.prefix is the venv, sys.base_prefix is the base" ok \
+    || check "sys.prefix is the venv, sys.base_prefix is the base" fail "prefix=$pref base=$base"
+log="$(cd "$BASE/envroot/sub" && "$PR" dir)/daemon.log"
+grep -q "re-executing under" "$log" \
+    && check "daemon re-executed into the same-binary venv" ok \
+    || check "daemon re-executed into the same-binary venv" fail "log: $(grep -m1 python "$log" 2>/dev/null || echo empty)"
+"$PR" stop >/dev/null 2>&1
+
+# ---------------------------------------------------------
+echo ""
 echo "== T8 env walk: pixi (.pixi/envs/default) =="
 rm -rf "$BASE/envroot/.venv"
 mkdir -p "$BASE/envroot/.pixi/envs/default/bin" "$BASE/envroot/.pixi/envs/default/lib/python3.99/site-packages"
