@@ -10,10 +10,11 @@
 #   4. The total run takes at least ~2 minutes (it really is a long loop)
 #
 # Usage: bash test_progress_2min.sh   (~2.2 minutes)
+#        PYREPLAB_TEST_BIN=/path/to/pyreplab bash test_progress_2min.sh  (test any install)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PR="$SCRIPT_DIR/pyreplab"
+PR="${PYREPLAB_TEST_BIN:-$SCRIPT_DIR/pyreplab}"
 export PYREPLAB_STAMP=0
 SESSION="$(mktemp -d /tmp/pyreplab_2min_XXXX)"
 export PYREPLAB_DIR="$SESSION"
@@ -44,6 +45,7 @@ check() {
 }
 
 echo "=== 2-minute progress-streaming soak test ==="
+echo "binary:  $PR"
 echo "session: $SESSION  timeout: ${PYREPLAB_TIMEOUT}s"
 "$PR" start >/dev/null 2>&1
 PIDS+=("$(cat "$SESSION/pyreplab.pid")")
