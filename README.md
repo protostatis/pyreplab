@@ -30,7 +30,8 @@ print(df.head(20))
 Then run cells:
 
 ```bash
-pyreplab start --workdir /path/to/project   # start (auto-detects .venv/) — daemon detaches from the shell (nohup)
+pyreplab start                        # start (auto-detects project root + .venv/ or pixi/conda)
+pyreplab run analysis.py:0            # Load data — stamps [0], [1], [2] into file
 pyreplab run analysis.py:0                  # Load data — stamps [0], [1], [2] into file
 pyreplab run analysis.py:1                  # Explore (df still loaded)
 pyreplab run analysis.py:2                  # Top rows (no reload)
@@ -49,7 +50,7 @@ After the first run, `analysis.py` is updated with cell indices:
 ```
 pyreplab <command> [args]
 
-  start [opts]        Start the REPL (opts: --workdir, --cwd, --venv, ...)
+  start [opts]        Start the REPL (see START OPTIONS in `pyreplab help`)
   run file.py         Run all cells (stamps [N] indices into file)
   run file.py:N       Run cell N from file (0-indexed)
   run 'code'          Run inline code
@@ -61,18 +62,21 @@ pyreplab <command> [args]
   stop                Stop the current session
   stop-all            Stop all active sessions
   ps                  List all active sessions with PID, uptime, memory
-  status              Check if REPL is running (shows idle/executing)
+  status              Check if REPL is running (shows idle/executing + resolved config)
   clean               Remove session files
 ```
+
+`pyreplab help` documents the start options, environment auto-detection order, and the agent workflow (exit codes, wait/cancel pattern).
 
 ## Server options
 
 ```
 python pyreplab.py [options]
 
-  --session-dir DIR    Session directory (default: /tmp/pyreplab)
-  --workdir DIR        Project root for session identity and .venv detection
-  --cwd DIR            Working directory for the REPL (defaults to --workdir)
+  --session-dir DIR    Session directory (resolved by the CLI; override with PYREPLAB_DIR)
+  --session-root DIR   Canonical project root (resolved by the CLI)
+  --cwd DIR            Lock the REPL's working directory to DIR (sticky). Default:
+                       each command runs in the caller's shell directory
   --venv PATH          Path to virtualenv directory itself (e.g. /project/.venv)
   --conda [ENV]        Activate conda env (default: base)
   --no-conda           Disable conda auto-detection
@@ -87,13 +91,21 @@ Note: the daemon has no server-side timeout — commands run to completion. The 
 
 ## Working directory
 
-By default, `--workdir` sets both the session identity (for .venv detection and session isolation) and the REPL's working directory. Use `--cwd` to override the REPL's working directory separately:
+`--cwd` is the only execution-directory flag, and it is **sticky**: the REPL runs in that directory regardless of where the caller's shell is, so relative imports and file paths always resolve there (`import config` finds `config.py` next to the working directory).
+
+Without `--cwd`, the REPL **follows the caller**: every `run` executes in the caller's shell directory, with that directory at `sys.path[0]` (the previous directory is removed — no path accumulation).
 
 ```bash
-# .venv detected from project root, but REPL runs in data subdir
-pyreplab start --workdir /project --cwd /project/data/experiment1
+# Sticky: REPL always runs in the data subdir
+pyreplab start --cwd /project/data/experiment1
 pyreplab run 'import pandas as pd; print(pd.read_csv("local_file.csv").shape)'
+
+# Follow: state persists in the project session, code runs where you are
+cd /project && pyreplab start
+cd /project/data && pyreplab run 'print(os.getcwd())'   # /project/data
 ```
+
+Note: `import config` caches in `sys.modules` — after moving directories, an already-imported module keeps its old identity (inherent to a persistent REPL; use a fresh name or `importlib.reload` for new locations).
 
 When `--cwd` is explicitly set, the working directory is **sticky** — it stays locked to that path for the entire session, regardless of where the caller's shell is when issuing `run` commands. This ensures `import mymodule` keeps working even if you `cd` elsewhere. Without `--cwd`, the daemon syncs its working directory to the caller's shell on each `run`.
 
@@ -146,36 +158,51 @@ Short commands that finish within the timeout window work identically to before 
 
 ## Environment detection
 
-pyreplab automatically detects and activates Python environments so your project packages are available. Detection follows a priority order — the first match wins:
+pyreplab automatically detects and activates the right Python environment, so **agents don't need to know which env system a project uses**. Detection follows a priority order — the first match wins:
 
 | Priority | Source | How it's found |
 |----------|--------|----------------|
 | 1 | `--venv PATH` | Explicit flag |
-| 2 | `.venv/` in workdir | Auto-detected |
-| 3 | `--conda [ENV]` | Explicit flag |
-| 4 | Conda base | Auto-detected fallback |
+| 2 | `$PIXI_ENVIRONMENT_PREFIX` | Set by `pixi run` / `pixi shell` |
+| 3 | `.venv` | Nearest one between the working directory and the project root (venv/uv convention) |
+| 4 | `.pixi/envs/<name>` | Nearest pixi environment (default name, or `$PIXI_ENVIRONMENT_NAME`) |
+| 5 | `--conda [ENV]` | Explicit flag |
+| 6 | Conda base | Auto-detected fallback |
 
-If a project has a `.venv/`, that always takes precedence over conda. If no `.venv/` exists, pyreplab falls back to conda's base environment (giving you numpy, pandas, scipy, etc. out of the box). Use `--no-conda` to disable the fallback.
+The daemon **re-executes under the environment's own python**, so the interpreter version, site-packages and compiled extensions (numpy, pandas, …) always match — no more cryptic import failures from a version mismatch. `status` shows what was resolved (`env venv:/path | python 3.13.11`). Use `--no-conda` to disable the conda fallback.
 
 ### Virtual environments (venv, uv, virtualenv)
 
 ```bash
-# Auto-detect .venv/ in workdir (most common — recommended for uv projects)
-pyreplab start --workdir /path/to/project
+# Auto-detect .venv/ (most common — recommended for uv projects)
+pyreplab start
 
 # Explicit path — must point to the .venv directory itself, not the project root
 pyreplab start --venv /path/to/project/.venv
 ```
 
-**Note:** `--venv` expects the path to the virtualenv directory (containing `lib/pythonX.Y/site-packages/`), not the project directory. To point at a project and have `.venv/` auto-detected, use `--workdir` instead.
-
 Works with `uv venv`, `python -m venv`, or any standard virtualenv.
+
+### Pixi environments
+
+```bash
+# Project pixi env (.pixi/envs/default) — auto-detected
+pyreplab start
+
+# Inside `pixi run` / `pixi shell` — $PIXI_ENVIRONMENT_PREFIX is used
+pyreplab start
+
+# Named envs: set PIXI_ENVIRONMENT_NAME, or it picks the single .pixi/envs/* entry
+pixi run --environment dev pyreplab start
+```
+
+Pixi envs are conda-style, so activation, the `bin/python` re-exec and PATH prepend all work unchanged.
 
 ### Conda environments
 
 ```bash
-# Auto-detect: if no .venv/, conda base is used automatically
-pyreplab start --workdir /path/to/project
+# Auto-detect: if no .venv/ or pixi env, conda base is used automatically
+pyreplab start
 
 # Explicit: force conda base
 pyreplab start --conda
@@ -196,12 +223,12 @@ Named envs resolve to `<conda_base>/envs/<name>`.
 
 ## Session isolation
 
-Each `--workdir` gets its own isolated session — separate process, namespace, and files. No clashing between projects.
+Each project root gets its own isolated session — separate process, namespace, and files. The root is auto-discovered from the nearest ancestor containing `.git` or `pyproject.toml` (falling back to the current directory), so sessions are keyed to projects, not shell locations.
 
 ```bash
-# Two projects, two sessions
-pyreplab start --workdir ~/projects/project-a
-pyreplab start --workdir ~/projects/project-b
+# Two projects, two sessions — no flags needed
+cd ~/projects/project-a && pyreplab start
+cd ~/projects/project-b && pyreplab start
 
 # See what's running
 pyreplab ps
@@ -209,12 +236,13 @@ pyreplab ps
 # project-a_a1b2c3d4           12345   5m30s    57MB   /tmp/pyreplab/project-a_a1b2c3d4
 # project-b_e5f6g7h8           12346   2m15s    43MB   /tmp/pyreplab/project-b_e5f6g7h8
 
-# Commands auto-resolve to the right session based on cwd
+# Commands auto-resolve to the right session based on the discovered root
 cd ~/projects/project-a && pyreplab run analysis.py:0
 cd ~/projects/project-b && pyreplab run analysis.py:0
 
-# Stop everything
-pyreplab stop-all
+# Override the session directory explicitly
+PYREPLAB_DIR=/custom/session pyreplab start
+pyreplab status   # shows root, mode (follow/sticky), env and python version
 ```
 
 ## Display limits
@@ -308,7 +336,7 @@ source ~/.zshrc
 Verify:
 
 ```bash
-pyreplab start --workdir .
+pyreplab start
 pyreplab run 'print("hello")'
 pyreplab stop
 ```
