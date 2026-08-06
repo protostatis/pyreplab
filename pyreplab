@@ -28,34 +28,69 @@ else
     PYREPLAB_SCRIPT="$(python3 -c 'import pyreplab; print(pyreplab.__file__)')"
 fi
 
-# Resolve session dir: explicit PYREPLAB_DIR, or derived from workdir
+# Discover the project root for a directory: nearest ancestor with .git,
+# else nearest with pyproject.toml, else the directory itself.
+_discover_root() {
+    local dir
+    dir=$(cd -P "$1" 2>/dev/null && pwd -P) || dir=$(pwd -P 2>/dev/null || echo /)
+    local cur="$dir"
+    while :; do
+        if [ -e "$cur/.git" ]; then
+            echo "$cur"
+            return 0
+        fi
+        if [ -f "$cur/pyproject.toml" ]; then
+            echo "$cur"
+            return 0
+        fi
+        [ "$cur" = "/" ] && break
+        cur=$(dirname "$cur")
+    done
+    echo "$dir"
+}
+
+# Resolve session dir: explicit PYREPLAB_DIR, or derived from the project root
 _resolve_dir() {
     if [ -n "${PYREPLAB_DIR:-}" ]; then
         echo "$PYREPLAB_DIR"
-    elif [ -n "${_PYREPLAB_WORKDIR:-}" ]; then
-        # Hash the workdir into a short session name
-        local hash
-        hash=$(printf '%s' "$_PYREPLAB_WORKDIR" | md5sum 2>/dev/null | cut -c1-8 || printf '%s' "$_PYREPLAB_WORKDIR" | md5 -q 2>/dev/null | cut -c1-8)
-        local name
-        name=$(basename "$_PYREPLAB_WORKDIR")
-        echo "$PYREPLAB_BASE/${name}_${hash}"
     else
-        echo "$PYREPLAB_BASE/default"
+        local start="${1:-${_PYREPLAB_WORKDIR:-$(pwd -P 2>/dev/null || pwd)}}"
+        local root
+        if [ "${_PYREPLAB_WORKDIR_EXPLICIT:-0}" = "1" ] && [ -z "$1" ]; then
+            # Legacy --workdir on stop/clean/dir etc. is an exact root
+            root="$start"
+        else
+            root=$(_discover_root "$start")
+        fi
+        _session_dir_for_root "$root"
     fi
 }
 
-# Extract --workdir from args, or default to cwd
+# Hash a project root into a session directory name
+_session_dir_for_root() {
+    local root="$1" hash name
+    hash=$(printf '%s' "$root" | md5sum 2>/dev/null | cut -c1-8 || printf '%s' "$root" | md5 -q 2>/dev/null | cut -c1-8)
+    name=$(basename "$root")
+    echo "$PYREPLAB_BASE/${name}_${hash}"
+}
+
+# Extract --workdir from args, or default to cwd. Explicit --workdir is a
+# legacy exact root (used by stop/clean/dir etc.); otherwise the caller's
+# cwd is the discovery starting point.
 _PYREPLAB_WORKDIR=""
+_PYREPLAB_WORKDIR_EXPLICIT=0
 _parse_workdir() {
     local args=("$@")
     for ((i=0; i<${#args[@]}; i++)); do
         if [ "${args[$i]}" = "--workdir" ] && [ $((i+1)) -lt ${#args[@]} ]; then
-            _PYREPLAB_WORKDIR="$(cd "${args[$((i+1))]}" && pwd)"
+            _PYREPLAB_WORKDIR="$(cd "${args[$((i+1))]}" && pwd -P)"
+            _PYREPLAB_WORKDIR_EXPLICIT=1
             return
         fi
     done
     # Default: cwd
-    _PYREPLAB_WORKDIR="$(pwd)"
+    _PYREPLAB_WORKDIR="$(pwd -P 2>/dev/null || pwd)"
+    _PYREPLAB_WORKDIR_EXPLICIT=0
 }
 
 _is_running() {
@@ -65,25 +100,59 @@ _is_running() {
     [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
 }
 
-# Resolve session with fallback: if cwd-derived session has no running daemon,
-# use the last-started session. Call after _parse_workdir.
-_resolve_session() {
-    if [ -z "${PYREPLAB_DIR:-}" ]; then
-        if ! _is_running && [ -f "$PYREPLAB_BASE/.last_session" ]; then
-            local last_dir
-            last_dir=$(cat "$PYREPLAB_BASE/.last_session")
-            local last_pid="$last_dir/pyreplab.pid"
-            if [ -f "$last_pid" ] && kill -0 "$(cat "$last_pid")" 2>/dev/null; then
-                export PYREPLAB_DIR="$last_dir"
-            fi
-        fi
-    fi
-}
-
+# Start a session: resolves --workdir (deprecated), --cwd and --session-dir
+# (deprecated) once, so the daemon never sees conflicting path flags.
 cmd_start() {
-    _parse_workdir "$@"
-    local dir
-    dir=$(_resolve_dir)
+    # Parse the path-bearing flags; everything else is passed through
+    local workdir="" cwd="" session_dir=""
+    local args=("$@") rest=() i=0
+    while [ $i -lt ${#args[@]} ]; do
+        case "${args[$i]}" in
+            --workdir)
+                if [ $((i+1)) -lt ${#args[@]} ]; then workdir="${args[$((i+1))]}"; fi
+                i=$((i+2)) ;;
+            --cwd)
+                if [ $((i+1)) -lt ${#args[@]} ]; then cwd="${args[$((i+1))]}"; fi
+                i=$((i+2)) ;;
+            --session-dir)
+                if [ $((i+1)) -lt ${#args[@]} ]; then session_dir="${args[$((i+1))]}"; fi
+                i=$((i+2)) ;;
+            *)
+                rest+=("${args[$i]}")
+                i=$((i+1)) ;;
+        esac
+    done
+
+    if [ -n "$workdir" ]; then
+        echo "pyreplab: --workdir is deprecated: sessions are auto-discovered from the project root (nearest .git or pyproject.toml); pass --cwd to pin the execution directory" >&2
+        workdir=$(cd "$workdir" && pwd -P)
+    fi
+    if [ -n "$session_dir" ]; then
+        echo "pyreplab: --session-dir is deprecated: use PYREPLAB_DIR instead" >&2
+    fi
+    if [ -n "$cwd" ]; then
+        cwd=$(cd -P "$cwd" && pwd -P) || {
+            echo "pyreplab: --cwd not found: $cwd" >&2
+            return 1
+        }
+    fi
+
+    # Session identity: legacy --workdir wins, else discovery from --cwd (or
+    # the start directory). Session dir: --session-dir > PYREPLAB_DIR > hash.
+    local root dir
+    if [ -n "$workdir" ]; then
+        root="$workdir"
+    else
+        root=$(_discover_root "${cwd:-$(pwd -P 2>/dev/null || pwd)}")
+    fi
+    if [ -n "$session_dir" ]; then
+        dir="$session_dir"
+    elif [ -n "${PYREPLAB_DIR:-}" ]; then
+        dir="$PYREPLAB_DIR"
+    else
+        dir=$(_session_dir_for_root "$root")
+    fi
+
     local pidfile="$dir/pyreplab.pid"
 
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
@@ -97,7 +166,12 @@ cmd_start() {
     # the session's stdin/stdout/stderr (log to daemon.log), and remove it from
     # the job table (disown). The daemon survives the bash session ending and
     # never holds the caller's pipes open (which would hang output capture).
-    nohup python3 "$PYREPLAB_SCRIPT" --session-dir "$dir" "$@" >"$dir/daemon.log" 2>&1 </dev/null &
+    local daemon_args=(--session-dir "$dir" --session-root "$root")
+    if [ -n "$cwd" ]; then
+        daemon_args+=(--cwd "$cwd")
+    fi
+    daemon_args+=("${rest[@]}")
+    nohup python3 "$PYREPLAB_SCRIPT" "${daemon_args[@]}" >"$dir/daemon.log" 2>&1 </dev/null &
     local pid=$!
     disown "$pid" 2>/dev/null || true
     echo "$pid" > "$pidfile"
@@ -108,8 +182,6 @@ cmd_start() {
         return 1
     fi
     echo "pyreplab: started (pid $pid, dir $dir)" >&2
-    # Save as last-used session for cross-directory reuse
-    printf '%s' "$dir" > "$PYREPLAB_BASE/.last_session"
 }
 
 cmd_stop() {
@@ -368,12 +440,30 @@ if error:
 '
 }
 
+# Verify a session is usable before sending a command: the session dir must
+# exist and its daemon must be alive.
+_session_ready() {
+    local dir="$1"
+    if [ ! -d "$dir" ]; then
+        echo "pyreplab: no session for this directory — run \`pyreplab start\` first (or set PYREPLAB_DIR)" >&2
+        return 1
+    fi
+    if ! _is_running; then
+        echo "pyreplab: session not running — run \`pyreplab start\` first (or set PYREPLAB_DIR)" >&2
+        return 1
+    fi
+    return 0
+}
+
 _send_code() {
     # Send code to the pyreplab server and print the response.
     local code="$1"
     local cell_label="${2:-}"
     local dir
     dir=$(_resolve_dir)
+    if ! _session_ready "$dir"; then
+        return 1
+    fi
     local id
     id="cmd_$$_$(date +%s%N 2>/dev/null || echo $RANDOM)"
     local cmd_path="$dir/cmd.py"
@@ -497,7 +587,6 @@ for i, m in enumerate(markers):
 cmd_run() {
     # Resolve session from cwd (unless PYREPLAB_DIR is set)
     [ -z "${PYREPLAB_DIR:-}" ] && _parse_workdir
-    _resolve_session
     local arg="${1:-}"
     local stamp="${PYREPLAB_STAMP:-1}"
 
@@ -621,6 +710,23 @@ print(s)
             fi
         fi
         echo "pyreplab: running (pid $(cat "$pidfile"), dir $dir), $state"
+        # Show resolved session configuration (root, mode, env, python)
+        if [ -f "$dir/session.json" ]; then
+            local sjson=""
+            sjson=$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+env = d.get("env", {})
+env_s = "none"
+if env.get("path"):
+    env_s = "%s:%s" % (env.get("type", "?"), env.get("path", "?"))
+s = "root %s | mode %s | env %s | python %s" % (
+    d.get("session_root", "?"), d.get("mode", "?"), env_s,
+    env.get("version", "?"))
+print(s)
+' "$dir/session.json" 2>/dev/null) || sjson=""
+            [ -n "$sjson" ] && echo "pyreplab: $sjson" >&2
+        fi
     else
         echo "pyreplab: not running"
         return 1
@@ -710,21 +816,21 @@ cmd_stop_all() {
 # --- Main dispatch ---
 case "${1:-help}" in
     start)  shift; cmd_start "$@" ;;
-    stop)   shift; _parse_workdir "$@"; _resolve_session; cmd_stop ;;
+    stop)   shift; _parse_workdir "$@"; cmd_stop ;;
     stop-all) cmd_stop_all ;;
-    clean)  shift; _parse_workdir "$@"; _resolve_session; cmd_clean ;;
+    clean)  shift; _parse_workdir "$@"; cmd_clean ;;
     run)    shift; cmd_run "$@" ;;
-    wait)   shift; _parse_workdir "$@"; _resolve_session; cmd_wait ;;
-    cancel) shift; _parse_workdir "$@"; _resolve_session; cmd_cancel ;;
+    wait)   shift; _parse_workdir "$@"; cmd_wait ;;
+    cancel) shift; _parse_workdir "$@"; cmd_cancel ;;
     cells)  shift; cmd_cells "$@" ;;
-    dir)    shift; _parse_workdir "$@"; _resolve_session; cmd_dir ;;
-    status) shift; _parse_workdir "$@"; _resolve_session; cmd_status ;;
+    dir)    shift; _parse_workdir "$@"; cmd_dir ;;
+    status) shift; _parse_workdir "$@"; cmd_status ;;
     ps|list|ls) cmd_ps ;;
     help|--help|-h)
         echo "Usage: pyreplab <command> [args]"
         echo ""
         echo "Commands:"
-        echo "  start [opts]        Start the REPL (opts: --workdir, --cwd, --venv, ...)"
+        echo "  start [opts]        Start the REPL (see START OPTIONS below)"
         echo "  run file.py         Run all cells (stamps [N] indices into file)"
         echo "  run file.py:N       Run cell N from file (0-indexed)"
         echo "  run 'code'          Run inline code"
@@ -739,9 +845,56 @@ case "${1:-help}" in
         echo "  ps                  List all active sessions"
         echo "  clean               Remove session files"
         echo ""
+        echo "AGENT WORKFLOW (how to drive pyreplab)"
+        echo "  # 1. Ensure a session is running for this directory:"
+        echo "  pyreplab status || pyreplab start"
+        echo "  # 2. Execute code: a file (all cells), one cell, or inline:"
+        echo "  pyreplab run analysis.py | pyreplab run analysis.py:2 | pyreplab run 'print(x)'"
+        echo "  # 3. run exits: 0 = done (output printed), 1 = error, 2 = still running."
+        echo "  #    On exit 2, poll until it finishes:"
+        echo "  pyreplab wait    # repeat until exit 0 or 1 (2s poll each)"
+        echo "  pyreplab cancel  # interrupt the running command (session survives)"
+        echo "  # 4. Long loops stream progress to stderr during run/wait:"
+        echo "  #    pyreplab: progress (3.0s) 710 chars out | last: iter 89"
+        echo "  # 5. Everything persists: imports, variables and state survive"
+        echo "  #    between commands and cells (one session per project)."
+        echo ""
+        echo "START OPTIONS (pyreplab start)"
+        echo "  --cwd DIR           Lock the REPL's working directory to DIR (sticky)."
+        echo "                      Default: each command runs in the caller's shell"
+        echo "                      directory, so relative imports and file paths"
+        echo "                      resolve where you are."
+        echo "  --workdir DIR       [DEPRECATED] project root for session identity;"
+        echo "                      sessions are now auto-discovered instead."
+        echo "  --venv PATH         Explicit virtualenv (venv/uv) to activate."
+        echo "  --conda [ENV]       Activate a conda environment (default: base)."
+        echo "  --no-conda          Disable automatic conda base fallback."
+        echo "  --max-output N      Max output chars per command (default: 100000)."
+        echo "  --max-rows N        Pandas max display rows (default: 50)."
+        echo "  --max-cols N        Pandas max display columns (default: 20)."
+        echo "  --poll-interval S   Daemon cmd.py poll interval (default: 0.05)."
+        echo "  --progress-interval S  Progress snapshot interval, 0 disables (default: 1.0)."
+        echo ""
+        echo "ENVIRONMENT AUTO-DETECTION (agents don't need to know the env system)"
+        echo "  Priority: --venv > \$PIXI_ENVIRONMENT_PREFIX (pixi run/shell) >"
+        echo "  nearest .venv (venv/uv) or .pixi/envs/<name> (pixi) between the"
+        echo "  working directory and the project root > conda base fallback."
+        echo "  The daemon re-executes under the env's own python, so versions"
+        echo "  always match. Disable the conda fallback with --no-conda."
+        echo ""
+        echo "SESSIONS"
+        echo "  One session per project root: auto-discovered from the nearest"
+        echo "  ancestor containing .git or pyproject.toml (or the start dir)."
+        echo "  Override the session directory with PYREPLAB_DIR."
+        echo ""
+        echo "ENVIRONMENT VARIABLES"
+        echo "  PYREPLAB_DIR        Session directory (overrides discovery)"
+        echo "  PYREPLAB_TIMEOUT    Client poll timeout in seconds (default: 30)"
+        echo "  PYREPLAB_PROGRESS   Set to 0 to disable progress lines"
+        echo "  PYREPLAB_STAMP      Set to 0 to disable [N] cell stamping"
         echo ""
         echo "Cell stamping adds [N] indices to # %% markers in your .py files."
-        echo "Set PYREPLAB_STAMP=0 to disable. Accepts both # %% and #%% markers."
+        echo "Accepts both # %% and #%% markers."
         ;;
     *)
         echo "pyreplab: unknown command '$1' (try 'pyreplab help')" >&2

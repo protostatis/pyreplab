@@ -273,6 +273,105 @@ def activate_venv(venv_path):
     return True
 
 
+def _find_env_in_bounds(start, root):
+    """Walk upward from `start` to `root` (inclusive) looking for an environment.
+
+    Checks for `.venv` (venv/uv convention) and `.pixi/envs/<name>` (pixi
+    convention) at each level; the nearest one wins. If `start` is not under
+    `root` (e.g. legacy `--workdir` launched from elsewhere), the root itself
+    is checked as a final fallback so `--workdir /proj` still finds
+    `/proj/.venv`.
+    """
+    start = os.path.abspath(start)
+    root = os.path.abspath(root)
+    name = os.environ.get("PIXI_ENVIRONMENT_NAME", "default")
+
+    def _env_in(d):
+        venv = os.path.join(d, ".venv")
+        if os.path.isdir(venv):
+            return venv, "venv"
+        pixi = os.path.join(d, ".pixi", "envs", name)
+        if os.path.isdir(pixi):
+            return pixi, "pixi"
+        # pixi with named envs: if `default` is missing but exactly one named
+        # env exists, use it
+        pixi_envs = os.path.join(d, ".pixi", "envs")
+        if os.path.isdir(pixi_envs):
+            named = [e for e in os.listdir(pixi_envs) if os.path.isdir(os.path.join(pixi_envs, e))]
+            if len(named) == 1:
+                return os.path.join(pixi_envs, named[0]), "pixi"
+        return None, None
+
+    d = start
+    reached_root = False
+    while True:
+        env_path, env_type = _env_in(d)
+        if env_path:
+            return env_path, env_type
+        if d == root:
+            reached_root = True
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    if not reached_root:
+        env_path, env_type = _env_in(root)
+        if env_path:
+            return env_path, env_type
+    return None, None
+
+
+def _reexec_under_env(env_path):
+    """Re-exec the daemon under the environment's own python.
+
+    site.addsitedir() alone leaves the daemon running under whatever python
+    the bash launcher found on PATH; if that version differs from the env's,
+    compiled extensions (numpy/pandas/...) fail with cryptic errors. Re-exec
+    makes interpreter, site-packages and .pyc caches consistent. Guarded by a
+    realpath comparison so it cannot loop (symlinked env pythons resolve to
+    the same real path on the second pass).
+    """
+    bin_dir = os.path.join(env_path, "bin")
+    if not os.path.isdir(bin_dir):
+        bin_dir = os.path.join(env_path, "Scripts")  # Windows
+    env_python = os.path.join(bin_dir, "python" if os.name != "nt" else "python.exe")
+    if not os.path.isfile(env_python):
+        return
+    try:
+        if os.path.realpath(env_python) == os.path.realpath(sys.executable):
+            return
+    except OSError:
+        return
+    print(f"pyreplab: re-executing under {env_python}", file=sys.stderr)
+    os.execv(env_python, [env_python] + sys.argv)
+
+
+_MANAGED_CWD = [None]  # module state: the cwd entry we manage in sys.path
+
+
+def _sync_cwd_to(target):
+    """chdir to `target` and enforce sys.path[0] == os.getcwd().
+
+    The previous managed entry is removed and duplicates of the new cwd are
+    dropped, so sys.path never accumulates caller directories (imports always
+    resolve against the current execution directory, `python script.py`
+    style). Returns False if the target no longer exists.
+    """
+    if not os.path.isdir(target):
+        return False
+    os.chdir(target)
+    cwd = os.getcwd()
+    prev = _MANAGED_CWD[0]
+    if prev is not None and prev in sys.path:
+        sys.path.remove(prev)
+    while cwd in sys.path:
+        sys.path.remove(cwd)
+    sys.path.insert(0, cwd)
+    _MANAGED_CWD[0] = cwd
+    return True
+
+
 def find_conda_base():
     """Find conda base environment. Checks $CONDA_PREFIX, $CONDA_EXE, then common paths."""
     # 1. Active conda env
@@ -357,15 +456,26 @@ def cleanup(session_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Persistent Python REPL for LLM CLI tools")
-    parser.add_argument("--session-dir", default="/tmp/pyreplab", help="Session directory (default: /tmp/pyreplab)")
-    parser.add_argument("--workdir", default=None, help="Project root for session identity and .venv detection")
-    parser.add_argument("--cwd", default=None, help="Working directory for the REPL (defaults to --workdir)")
-    parser.add_argument("--venv", default=None, help="Path to virtualenv directory (e.g. /project/.venv). Use --workdir to auto-detect .venv/")
+    parser = argparse.ArgumentParser(
+        description="Persistent Python REPL for LLM CLI tools",
+        epilog=(
+            "Sessions are keyed to a project root: auto-discovered from the nearest "
+            "ancestor containing .git or pyproject.toml (see `pyreplab help` for the "
+            "full environment auto-detection order)."
+        ),
+    )
+    parser.add_argument("--session-dir", default="/tmp/pyreplab", help="Session directory (resolved by the CLI; override with PYREPLAB_DIR)")
+    parser.add_argument("--session-root", default=None, help="Canonical project root (resolved by the CLI)")
+    parser.add_argument("--workdir", default=None, help="[deprecated] alias for --session-root")
+    parser.add_argument("--cwd", default=None,
+                        help="Lock the REPL's working directory to DIR (sticky). Without it, each command runs in the caller's shell directory")
+    parser.add_argument("--venv", default=None,
+                        help="Explicit virtualenv (venv/uv) to activate, e.g. /project/.venv")
     parser.add_argument("--conda", default=None, nargs="?", const="base",
-                        help="Activate conda env (default: base). Use --conda for base, --conda envname for a named env")
-    parser.add_argument("--no-conda", action="store_true", help="Disable conda auto-detection")
-    parser.add_argument("--max-output", type=int, default=100_000, help="Max output chars (default: 100000)")
+                        help="Activate a conda environment (default: base). Use --conda for base, --conda envname for a named env")
+    parser.add_argument("--no-conda", action="store_true",
+                        help="Disable automatic conda base fallback (explicit --conda still works)")
+    parser.add_argument("--max-output", type=int, default=100_000, help="Max output chars per command (default: 100000)")
     parser.add_argument("--max-rows", type=int, default=50, help="Pandas max display rows (default: 50)")
     parser.add_argument("--max-cols", type=int, default=20, help="Pandas max display columns (default: 20)")
     parser.add_argument("--poll-interval", type=float, default=0.05, help="Poll interval in seconds (default: 0.05)")
@@ -373,52 +483,83 @@ def main():
                         help="Seconds between progress.json snapshots while executing (0 disables, default: 1.0)")
     args = parser.parse_args()
 
+    # --- Resolve session root and working directory ---
+    session_root = os.path.abspath(args.session_root or args.workdir or os.getcwd())
     session_dir = args.session_dir
     os.makedirs(session_dir, exist_ok=True)
 
-    # Detect .venv from --workdir (project root), not --cwd
-    venv_detect_dir = os.path.abspath(args.workdir) if args.workdir else os.getcwd()
-
-    # Activate environment: explicit --venv, auto-detect .venv/ in workdir, or fallback to conda base
-    venv_path = args.venv
-    if venv_path is None:
-        candidate = os.path.join(venv_detect_dir, ".venv")
-        if os.path.isdir(candidate):
-            venv_path = candidate
-    if venv_path:
-        activate_venv(venv_path)
-    elif args.conda:
-        # Explicit --conda: "base" or a named env
-        conda_base = find_conda_base()
-        if conda_base:
-            if args.conda == "base":
-                activate_venv(conda_base)
-            else:
-                env_path = os.path.join(conda_base, "envs", args.conda)
-                if os.path.isdir(env_path):
-                    activate_venv(env_path)
-                else:
-                    print(f"pyreplab: conda env '{args.conda}' not found at {env_path}", file=sys.stderr)
-        else:
-            print("pyreplab: conda not found", file=sys.stderr)
-    elif not args.no_conda:
-        # Auto-detect: no .venv/ found, try conda base as fallback
-        conda_base = find_conda_base()
-        if conda_base:
-            activate_venv(conda_base)
-
-    # When --cwd is explicit, lock the working directory so per-command sync is skipped
+    # --cwd is sticky: chdir once at startup, skip per-command sync.
+    # Without --cwd: follow the caller's shell directory on every run.
     cwd_locked = args.cwd is not None
+    if args.cwd is not None:
+        if not os.path.isdir(args.cwd):
+            print(f"pyreplab: --cwd not found: {args.cwd}", file=sys.stderr)
+            sys.exit(1)
+        os.chdir(args.cwd)
 
-    # Set working directory: --cwd overrides --workdir
-    final_cwd = args.cwd or args.workdir
-    if final_cwd:
-        os.chdir(final_cwd)
+    # --- Environment auto-detection ---
+    # Priority: --venv > $PIXI_ENVIRONMENT_PREFIX > nearest .venv (venv/uv)
+    # or .pixi/envs/<name> (pixi) on the way to the session root > conda.
+    venv_path = args.venv
+    env_type = "venv"
+    if venv_path is None:
+        pixi_prefix = os.environ.get("PIXI_ENVIRONMENT_PREFIX", "")
+        if pixi_prefix and os.path.isdir(pixi_prefix):
+            venv_path = pixi_prefix
+            env_type = "pixi"
+    if venv_path is None:
+        found, found_type = _find_env_in_bounds(os.getcwd(), session_root)
+        if found:
+            venv_path, env_type = found, found_type
+    if venv_path is None and not args.no_conda:
+        if args.conda:
+            conda_base = find_conda_base()
+            if conda_base:
+                if args.conda == "base":
+                    venv_path, env_type = conda_base, "conda"
+                else:
+                    candidate = os.path.join(conda_base, "envs", args.conda)
+                    if os.path.isdir(candidate):
+                        venv_path, env_type = candidate, "conda"
+                    else:
+                        print(f"pyreplab: conda env '{args.conda}' not found at {candidate}", file=sys.stderr)
+            else:
+                print("pyreplab: conda not found", file=sys.stderr)
+        else:
+            conda_base = find_conda_base()
+            if conda_base:
+                venv_path, env_type = conda_base, "conda"
 
-    # Ensure cwd is in sys.path so local imports work (like running `python script.py`)
-    cwd = os.getcwd()
-    if cwd not in sys.path:
-        sys.path.insert(0, cwd)
+    # Run under the env's own interpreter (version-consistent imports), then
+    # add its site-packages to sys.path.
+    if venv_path:
+        _reexec_under_env(venv_path)
+        activate_venv(venv_path)
+
+    # Enforce sys.path[0] == execution cwd (sticky: locked dir; follow:
+    # the daemon's start directory until the first command syncs it).
+    _sync_cwd_to(os.getcwd())
+
+    # Record resolved session configuration for `pyreplab status` / `ps`
+    atomic_write(os.path.join(session_dir, "session.json"), {
+        "session_dir": session_dir,
+        "session_root": session_root,
+        "mode": "sticky" if cwd_locked else "follow",
+        "cwd": os.getcwd(),
+        "env": {
+            "type": env_type if venv_path else "none",
+            "path": os.path.abspath(venv_path) if venv_path else None,
+            "python": sys.executable,
+            "version": sys.version.split()[0],
+        },
+        "options": {
+            "max_output": args.max_output,
+            "max_rows": args.max_rows,
+            "max_cols": args.max_cols,
+            "poll_interval": args.poll_interval,
+            "progress_interval": args.progress_interval,
+        },
+    })
 
     # Clean any stale files from a previous run
     cleanup(session_dir)
@@ -464,12 +605,19 @@ def main():
 
         code, cmd_id, cmd_cwd, cell_label, notebook_path = parse_cmd_file(text)
 
-        # Sync working directory and sys.path to caller's cwd (skip if --cwd locked it)
-        if not cwd_locked and cmd_cwd and os.path.isdir(cmd_cwd):
-            if os.getcwd() != cmd_cwd:
-                os.chdir(cmd_cwd)
-            if cmd_cwd not in sys.path:
-                sys.path.insert(0, cmd_cwd)
+        # Sync working directory and sys.path to caller's cwd (skip if --cwd locked it).
+        # If the caller's directory no longer exists, fail the command instead of
+        # silently executing in a stale directory.
+        if not cwd_locked and cmd_cwd:
+            if not _sync_cwd_to(cmd_cwd):
+                atomic_write(output_path, {
+                    "stdout": "", "stderr": "",
+                    "error": f"pyreplab: caller cwd no longer exists: {cmd_cwd}",
+                    "id": cmd_id,
+                })
+                with open(done_path, "w") as f:
+                    f.write(cmd_id)
+                continue
 
         global _executing
 
