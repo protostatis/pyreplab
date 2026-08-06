@@ -5,11 +5,15 @@ You have access to a persistent Python REPL via `pyreplab`. Data stays in memory
 ## Setup (run once at start)
 
 ```bash
-# Start the REPL for the project you're working in
-/path/to/pyreplab start --workdir /path/to/project
+# Start the REPL for the project you're working in — no flags needed
+/path/to/pyreplab start
 ```
 
-The `--workdir` auto-detects `.venv/` so all project packages are available. Sessions are isolated per project.
+The session root is auto-discovered from the nearest ancestor with `.git` or
+`pyproject.toml`, and the Python environment (`.venv` for venv/uv, pixi
+`.pixi/envs/*`, or conda) is auto-detected — the daemon re-executes under the
+env's own python so versions always match. Sessions are isolated per project.
+`status` shows the resolved root, mode, env and python version.
 
 ## Context recovery (read this first!)
 
@@ -70,19 +74,19 @@ pyreplab run 'print(df.columns.tolist())'
 ## Commands reference
 
 ```
-pyreplab start --workdir DIR    Start session (auto-detects .venv/)
-pyreplab start --workdir DIR --cwd DIR   Start with separate working directory (locks cwd for imports)
-pyreplab run file.py:N          Run cell N (stamps [N] indices into file)
-pyreplab run file.py            Run all cells (stamps [N] indices into file)
-pyreplab run 'code'             Run inline code
-pyreplab cells file.py          List cells (stamps [N], peeks comments for labels)
-pyreplab wait                   Wait for a long-running command to finish
-pyreplab cancel                 Cancel the currently running command
-pyreplab dir                    Print session directory path
-pyreplab status                 Check if REPL is running (idle/executing)
-pyreplab ps                     Show active sessions
-pyreplab stop                   Stop current session
-pyreplab stop-all               Stop all sessions
+pyreplab start                Start session (auto-discovers root + env; no flags needed)
+pyreplab start --cwd DIR      Start with the working directory locked to DIR (sticky imports)
+pyreplab run file.py:N        Run cell N (stamps [N] indices into file)
+pyreplab run file.py          Run all cells (stamps [N] indices into file)
+pyreplab run 'code'           Run inline code
+pyreplab cells file.py        List cells (stamps [N], peeks comments for labels)
+pyreplab wait                 Wait for a long-running command to finish
+pyreplab cancel               Cancel the currently running command
+pyreplab dir                  Print session directory path
+pyreplab status               Check if REPL is running (idle/executing + resolved config)
+pyreplab ps                   Show active sessions
+pyreplab stop                 Stop current session
+pyreplab stop-all             Stop all sessions
 ```
 
 Long-running commands return early with exit code 2 and a "still running" message. Use `pyreplab wait` to resume polling. If you get "busy running previous command", run `pyreplab wait` first before submitting new code. To abort a stuck or unwanted command, use `pyreplab cancel` — it interrupts the running code without killing the session.

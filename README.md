@@ -336,7 +336,7 @@ source ~/.zshrc
 Verify:
 
 ```bash
-pyreplab start --workdir .
+pyreplab start
 pyreplab run 'print("hello")'
 pyreplab stop
 ```
