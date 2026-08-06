@@ -92,9 +92,14 @@ cmd_start() {
     fi
     mkdir -p "$dir"
     # Clean stale IPC files from a previous (dead) session
-    rm -f "$dir/cmd.py" "$dir/output.json" "$dir/done" "$dir/pending_id" "$dir/pending_start"
-    python3 "$PYREPLAB_SCRIPT" --session-dir "$dir" "$@" &
+    rm -f "$dir/cmd.py" "$dir/output.json" "$dir/done" "$dir/pending_id" "$dir/pending_start" "$dir/progress.json" "$dir/progress.json.tmp"
+    # Detach the daemon from this shell session: ignore SIGHUP (nohup), drop
+    # the session's stdin/stdout/stderr (log to daemon.log), and remove it from
+    # the job table (disown). The daemon survives the bash session ending and
+    # never holds the caller's pipes open (which would hang output capture).
+    nohup python3 "$PYREPLAB_SCRIPT" --session-dir "$dir" "$@" >"$dir/daemon.log" 2>&1 </dev/null &
     local pid=$!
+    disown "$pid" 2>/dev/null || true
     echo "$pid" > "$pidfile"
     sleep 0.3
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -131,7 +136,7 @@ cmd_stop() {
 cmd_clean() {
     local dir
     dir=$(_resolve_dir)
-    for f in cmd.py cmd.py.tmp output.json output.json.tmp done pending_id pending_start; do
+    for f in cmd.py cmd.py.tmp output.json output.json.tmp done pending_id pending_start progress.json progress.json.tmp; do
         [ -f "$dir/$f" ] && rm -f "$dir/$f"
     done
     echo "pyreplab: cleaned session files in $dir" >&2
@@ -226,10 +231,72 @@ print(cells[idx], end="")
 ' "$file" "$cell_idx"
 }
 
+# Print a progress line to stderr when progress.json has new data from the
+# daemon (partial output during long-running commands). Dedup: once per new
+# snapshot for chatty commands; heartbeat every 10s for silent ones.
+# State is per-invocation, so a fresh `wait` shows the current progress once.
+_PROG_FKEY=""
+_PROG_CKEY=""
+_PROG_TS=""
+_show_progress() {
+    [ "${PYREPLAB_PROGRESS:-1}" = "1" ] || return 0
+    local dir="$1" cmd_id="${2:-}" p="$dir/progress.json"
+    [ -f "$p" ] || return 0
+    # Cheap pre-filter: only parse when the file changed (mtime+size — size
+    # catches sub-second snapshots where mtime resolution is 1s)
+    local pm="" pz=""
+    pm=$(stat -f%m "$p" 2>/dev/null) || pm=$(stat -c%Y "$p" 2>/dev/null) || true
+    pz=$(stat -f%z "$p" 2>/dev/null) || pz=$(stat -c%s "$p" 2>/dev/null) || true
+    [ -n "$pm" ] || return 0
+    local fkey="${pm}:${pz}"
+    [ "$fkey" = "$_PROG_FKEY" ] && return 0
+    _PROG_FKEY="$fkey"
+    local content=""
+    content=$(cat "$p" 2>/dev/null) || true
+    [ -z "$content" ] && return 0
+    local kv=""
+    kv=$(printf '%s' "$content" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+want = sys.argv[1] if len(sys.argv) > 1 else ""
+if want and d.get("id") != want:
+    sys.exit(0)
+chars = d.get("stdout_chars", 0) + d.get("stderr_chars", 0)
+cell = d.get("cell", "")
+elapsed = d.get("elapsed", 0)
+tail = (d.get("stdout") or "").rstrip().splitlines()
+if not tail:
+    tail = (d.get("stderr") or "").rstrip().splitlines()
+last = tail[-1].strip()[-120:] if tail else ""
+parts = []
+if cell: parts.append("cell %s" % cell)
+parts.append("%d chars out" % chars)
+msg = "pyreplab: progress (%.1fs) %s" % (elapsed, " | ".join(parts))
+if last: msg += " | last: %s" % last
+print("%d|%s" % (chars, cell))
+print(msg)
+' "$cmd_id" 2>/dev/null) || kv=""
+    [ -z "$kv" ] && return 0
+    local ckey="${kv%%$'\n'*}"
+    local msg="${kv#*$'\n'}"
+    if [ "$ckey" = "$_PROG_CKEY" ]; then
+        # Same output as before: heartbeat only every 10s
+        local now
+        now=$(date +%s)
+        [ -n "$_PROG_TS" ] && [ $((now - _PROG_TS)) -lt 10 ] && return 0
+        _PROG_TS="$now"
+    else
+        _PROG_TS=$(date +%s)
+    fi
+    _PROG_CKEY="$ckey"
+    echo "$msg" >&2
+}
+
 _wait_for_result() {
     # Poll for command completion and print output.
     # Returns 0 on success, 1 on error output, 2 on timeout (still running).
     local timeout="${1:-30}"
+    local cmd_id="${2:-}"
     local dir
     dir=$(_resolve_dir)
     local done_path="$dir/done"
@@ -240,34 +307,49 @@ _wait_for_result() {
     local start_time=""
     [ -f "$dir/pending_start" ] && start_time=$(cat "$dir/pending_start")
 
-    # Poll for completion
+    # Poll for completion. If a done/output.json pair appears whose id does not
+    # match this command (stale files from a previous command or an orphaned
+    # daemon), discard it and keep polling for the real result.
     local elapsed=0
-    while [ ! -f "$done_path" ]; do
-        sleep 0.1
-        elapsed=$((elapsed + 1))
-        if [ "$elapsed" -ge "$((timeout * 10))" ]; then
-            local total="${timeout}s"
-            if [ -n "$start_time" ]; then
-                total="$(( $(date +%s) - start_time ))s"
+    local result=""
+    while :; do
+        while [ ! -f "$done_path" ]; do
+            sleep 0.1
+            elapsed=$((elapsed + 1))
+            _show_progress "$dir" "$cmd_id"
+            if [ "$elapsed" -ge "$((timeout * 10))" ]; then
+                local total="${timeout}s"
+                if [ -n "$start_time" ]; then
+                    total="$(( $(date +%s) - start_time ))s"
+                fi
+                echo "pyreplab: still running (${total} elapsed). Run \`pyreplab wait\` to check again." >&2
+                return 2
             fi
-            echo "pyreplab: still running (${total} elapsed). Run \`pyreplab wait\` to check again." >&2
-            return 2
+        done
+
+        # Read output and verify it belongs to this command
+        result=$(cat "$output_path" 2>/dev/null) || true
+        if [ -z "$result" ]; then
+            echo "pyreplab: no output received" >&2
+            rm -f "$done_path" "$pending_path" "$dir/pending_start" "$dir/progress.json" "$dir/progress.json.tmp"
+            return 1
         fi
+        if [ -n "$cmd_id" ]; then
+            local result_id=""
+            result_id=$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null) || true
+            if [ -n "$result_id" ] && [ "$result_id" != "$cmd_id" ]; then
+                echo "pyreplab: discarding stale output (id $result_id != $cmd_id), waiting for the real result..." >&2
+                rm -f "$done_path" "$output_path"
+                continue
+            fi
+        fi
+        break
     done
 
     # Clean up handshake files
     rm -f "$done_path"
-
-    # Read output, then clean it up
-    local result
-    result=$(cat "$output_path" 2>/dev/null) || true
-    if [ -z "$result" ]; then
-        echo "pyreplab: no output received" >&2
-        rm -f "$pending_path" "$dir/pending_start"
-        return 1
-    fi
     rm -f "$output_path"
-    rm -f "$pending_path" "$dir/pending_start"
+    rm -f "$pending_path" "$dir/pending_start" "$dir/progress.json" "$dir/progress.json.tmp"
 
     # Parse JSON and print (single python3 call)
     printf '%s' "$result" | python3 -c '
@@ -304,7 +386,7 @@ _send_code() {
     if [ -f "$pending_path" ]; then
         # If daemon is dead, these are stale files from a previous session — clean up
         if ! _is_running; then
-            rm -f "$pending_path" "$done_path" "$output_path" "$dir/cmd.py" "$dir/pending_start"
+            rm -f "$pending_path" "$done_path" "$output_path" "$dir/cmd.py" "$dir/pending_start" "$dir/progress.json" "$dir/progress.json.tmp"
         else
             echo "pyreplab: busy running previous command. Run \`pyreplab wait\` first." >&2
             return 1
@@ -312,7 +394,7 @@ _send_code() {
     fi
 
     # Remove stale handshake files
-    rm -f "$done_path" "$output_path"
+    rm -f "$done_path" "$output_path" "$dir/progress.json" "$dir/progress.json.tmp"
 
     # Write cmd.py with #%% cell header (atomic: write tmp, then move)
     local header="id: $id cwd: $(pwd)"
@@ -325,7 +407,7 @@ _send_code() {
     date +%s > "$dir/pending_start"
 
     # Wait for result
-    _wait_for_result "$timeout"
+    _wait_for_result "$timeout" "$id"
 }
 
 _send_notebook() {
@@ -345,14 +427,14 @@ _send_notebook() {
     # Check if server is busy with a previous command
     if [ -f "$pending_path" ]; then
         if ! _is_running; then
-            rm -f "$pending_path" "$done_path" "$output_path" "$dir/cmd.py" "$dir/pending_start"
+            rm -f "$pending_path" "$done_path" "$output_path" "$dir/cmd.py" "$dir/pending_start" "$dir/progress.json" "$dir/progress.json.tmp"
         else
             echo "pyreplab: busy running previous command. Run \`pyreplab wait\` first." >&2
             return 1
         fi
     fi
 
-    rm -f "$done_path" "$output_path"
+    rm -f "$done_path" "$output_path" "$dir/progress.json" "$dir/progress.json.tmp"
 
     # Write cmd.py with notebook header (no code body — daemon reads the file)
     local header="id: $id cwd: $(pwd) notebook: $notebook_abs"
@@ -463,13 +545,13 @@ cmd_wait() {
 
     # If daemon is dead, the pending command will never complete — clean up
     if ! _is_running; then
-        rm -f "$dir/pending_id" "$dir/pending_start" "$dir/done" "$dir/output.json" "$dir/cmd.py"
+        rm -f "$dir/pending_id" "$dir/pending_start" "$dir/done" "$dir/output.json" "$dir/cmd.py" "$dir/progress.json" "$dir/progress.json.tmp"
         echo "pyreplab: server died while command was pending (cleaned up stale files)" >&2
         return 1
     fi
 
     # Short poll (2s) — return quickly so agents aren't blocked
-    _wait_for_result 2
+    _wait_for_result 2 "$(cat "$dir/pending_id" 2>/dev/null || true)"
 }
 
 cmd_cancel() {
@@ -493,7 +575,7 @@ cmd_cancel() {
     echo "pyreplab: cancel signal sent" >&2
 
     # Wait briefly for the daemon to finish processing the cancellation
-    _wait_for_result 5
+    _wait_for_result 5 "$(cat "$dir/pending_id" 2>/dev/null || true)"
 }
 
 cmd_dir() {
@@ -513,6 +595,29 @@ cmd_status() {
             if [ -f "$dir/pending_start" ]; then
                 local elapsed=$(( $(date +%s) - $(cat "$dir/pending_start") ))
                 state="executing command (${elapsed}s elapsed)"
+            fi
+            # Append latest progress tail from the daemon's progress.json
+            # (only if it belongs to the pending command)
+            if [ -f "$dir/progress.json" ]; then
+                local ptail="" want_id=""
+                want_id=$(cat "$dir/pending_id" 2>/dev/null) || true
+                ptail=$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+want = sys.argv[2] if len(sys.argv) > 2 else ""
+if want and d.get("id") != want:
+    sys.exit(0)
+chars = d.get("stdout_chars", 0) + d.get("stderr_chars", 0)
+tail = (d.get("stdout") or "").rstrip().splitlines()
+if not tail:
+    tail = (d.get("stderr") or "").rstrip().splitlines()
+last = tail[-1].strip()[-80:] if tail else ""
+s = "progress %.1fs | %d chars" % (d.get("elapsed", 0), chars)
+if d.get("cell"): s += " | cell %s" % d["cell"]
+if last: s += " | last: %s" % last
+print(s)
+' "$dir/progress.json" "$want_id" 2>/dev/null) || ptail=""
+                [ -n "$ptail" ] && state="$state, $ptail"
             fi
         fi
         echo "pyreplab: running (pid $(cat "$pidfile"), dir $dir), $state"

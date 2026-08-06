@@ -7,6 +7,7 @@ Zero dependencies — stdlib only.
 """
 
 import argparse
+import collections
 import contextlib
 import glob
 import io
@@ -16,6 +17,7 @@ import re
 import signal
 import site
 import sys
+import threading
 import time
 import traceback
 
@@ -32,6 +34,64 @@ def atomic_write(path, data):
     with open(tmp, "w") as f:
         json.dump(data, f)
     os.rename(tmp, path)
+
+
+class _Capture(io.StringIO):
+    """Thread-safe StringIO with a bounded tail + char count for progress.
+
+    The monitor thread calls snapshot() while the main thread writes; a lock
+    keeps both consistent. Maintaining the tail incrementally avoids copying
+    the whole output buffer on every progress tick (quadratic for long runs).
+    """
+
+    def __init__(self, tail_chars):
+        super().__init__()
+        self._tail = collections.deque(maxlen=tail_chars)
+        self._count = 0
+        self._lock = threading.Lock()
+
+    def write(self, s):
+        with self._lock:
+            n = super().write(s)
+            self._tail.extend(s[:n])
+            self._count += n
+        return n
+
+    def getvalue(self):
+        with self._lock:
+            return super().getvalue()
+
+    def snapshot(self):
+        """Return (tail_text, total_chars) — O(tail) per call, not O(total)."""
+        with self._lock:
+            return "".join(self._tail), self._count
+
+
+def _write_progress(progress_state, session_dir):
+    """Snapshot partial output into progress.json (called from monitor thread)."""
+    stdout_cap = progress_state.get("stdout")
+    stderr_cap = progress_state.get("stderr")
+    stdout_tail, stdout_chars = stdout_cap.snapshot() if stdout_cap is not None else ("", 0)
+    stderr_tail, stderr_chars = stderr_cap.snapshot() if stderr_cap is not None else ("", 0)
+    atomic_write(os.path.join(session_dir, "progress.json"), {
+        "stdout": stdout_tail,
+        "stderr": stderr_tail,
+        "stdout_chars": stdout_chars,
+        "stderr_chars": stderr_chars,
+        "elapsed": round(time.time() - progress_state["start"], 1),
+        "cell": progress_state.get("cell", ""),
+        "id": progress_state.get("id", ""),
+    })
+
+
+def _progress_worker(progress_state, stop_event, session_dir, interval):
+    """Background thread: while a command executes, write progress.json every
+    `interval` seconds so clients can show partial output during long runs."""
+    while not stop_event.wait(interval):
+        try:
+            _write_progress(progress_state, session_dir)
+        except Exception:
+            pass
 
 
 def _fix_semicolons(code):
@@ -54,16 +114,23 @@ def _fix_semicolons(code):
             return code
 
 
-def run_code(code, namespace, max_output=100_000, label=""):
+def run_code(code, namespace, max_output=100_000, label="", progress_state=None):
     """Execute code in the persistent namespace, capturing output.
 
     No server-side timeout — commands run to completion. The client handles
     async polling (returns exit code 2 after its poll timeout, then
     `pyreplab wait` resumes polling until the server writes output).
+
+    If progress_state is given (dict with "stdout"/"stderr" keys), the output
+    buffers are exposed there so the monitor thread can snapshot partial
+    output into progress.json during execution.
     """
     code = _fix_semicolons(code)
-    stdout_buf = io.StringIO()
-    stderr_buf = io.StringIO()
+    stdout_buf = _Capture(4000)
+    stderr_buf = _Capture(2000)
+    if progress_state is not None:
+        progress_state["stdout"] = stdout_buf
+        progress_state["stderr"] = stderr_buf
     error = None
     filename = f"<pyreplab:{label}>" if label else "<pyreplab>"
 
@@ -282,7 +349,8 @@ def append_history(session_dir, index, code, stdout, stderr, error):
 
 def cleanup(session_dir):
     """Remove session files on shutdown."""
-    for name in ("cmd.py", "cmd.py.tmp", "output.json", "output.json.tmp", "done", "pending_id", "pending_start"):
+    for name in ("cmd.py", "cmd.py.tmp", "output.json", "output.json.tmp", "done", "pending_id", "pending_start",
+                 "progress.json", "progress.json.tmp"):
         path = os.path.join(session_dir, name)
         if os.path.exists(path):
             os.remove(path)
@@ -301,6 +369,8 @@ def main():
     parser.add_argument("--max-rows", type=int, default=50, help="Pandas max display rows (default: 50)")
     parser.add_argument("--max-cols", type=int, default=20, help="Pandas max display columns (default: 20)")
     parser.add_argument("--poll-interval", type=float, default=0.05, help="Poll interval in seconds (default: 0.05)")
+    parser.add_argument("--progress-interval", type=float, default=1.0,
+                        help="Seconds between progress.json snapshots while executing (0 disables, default: 1.0)")
     args = parser.parse_args()
 
     session_dir = args.session_dir
@@ -403,78 +473,114 @@ def main():
 
         global _executing
 
-        if notebook_path:
-            # Server-side notebook execution: read file, split cells, run all sequentially
-            try:
-                with open(notebook_path) as f:
-                    nb_text = f.read()
-            except IOError as e:
+        # Progress monitoring for this command: a thread snapshots partial
+        # output into progress.json while the command runs.
+        progress_state = {
+            "stdout": None, "stderr": None,
+            "cell": cell_label, "id": cmd_id, "start": time.time(),
+        }
+        stop_progress = threading.Event()
+        progress_thread = None
+        if args.progress_interval > 0:
+            progress_thread = threading.Thread(
+                target=_progress_worker,
+                args=(progress_state, stop_progress, session_dir, args.progress_interval),
+                daemon=True,
+            )
+            progress_thread.start()
+
+        try:
+            if notebook_path:
+                # Server-side notebook execution: read file, split cells, run all sequentially
+                try:
+                    with open(notebook_path) as f:
+                        nb_text = f.read()
+                except IOError as e:
+                    atomic_write(output_path, {
+                        "stdout": "", "stderr": "",
+                        "error": f"pyreplab: cannot read notebook: {e}",
+                        "id": cmd_id,
+                    })
+                    with open(done_path, "w") as f:
+                        f.write(cmd_id)
+                    continue
+
+                cells = _split_notebook(nb_text)
+                nb_base = os.path.basename(notebook_path)
+                all_stdout = []
+                all_stderr = []
+                error = None
+
+                for i, cell_code in enumerate(cells):
+                    if not cell_code.strip():
+                        continue
+                    _executing = True
+                    try:
+                        progress_state["cell"] = f"{nb_base}:{i}"
+                        stdout, stderr, err = run_code(
+                            cell_code, namespace,
+                            max_output=args.max_output,
+                            label=f"{nb_base}:{i}",
+                            progress_state=progress_state,
+                        )
+                    finally:
+                        _executing = False
+
+                    all_stdout.append(stdout)
+                    all_stderr.append(stderr)
+                    append_history(session_dir, exec_index, cell_code, stdout, stderr, err)
+                    exec_index += 1
+
+                    if err:
+                        error = f"[cell {nb_base}:{i}] {err}"
+                        break
+
                 atomic_write(output_path, {
-                    "stdout": "", "stderr": "",
-                    "error": f"pyreplab: cannot read notebook: {e}",
+                    "stdout": "".join(all_stdout),
+                    "stderr": "".join(all_stderr),
+                    "error": error,
                     "id": cmd_id,
                 })
                 with open(done_path, "w") as f:
                     f.write(cmd_id)
-                continue
-
-            cells = _split_notebook(nb_text)
-            nb_base = os.path.basename(notebook_path)
-            all_stdout = []
-            all_stderr = []
-            error = None
-
-            for i, cell_code in enumerate(cells):
-                if not cell_code.strip():
-                    continue
+            else:
+                # Single command execution
                 _executing = True
                 try:
-                    stdout, stderr, err = run_code(
-                        cell_code, namespace,
-                        max_output=args.max_output,
-                        label=f"{nb_base}:{i}",
+                    stdout, stderr, error = run_code(
+                        code, namespace, max_output=args.max_output, label=cell_label,
+                        progress_state=progress_state,
                     )
                 finally:
                     _executing = False
 
-                all_stdout.append(stdout)
-                all_stderr.append(stderr)
-                append_history(session_dir, exec_index, cell_code, stdout, stderr, err)
+                append_history(session_dir, exec_index, code, stdout, stderr, error)
                 exec_index += 1
 
-                if err:
-                    error = f"[cell {nb_base}:{i}] {err}"
-                    break
+                atomic_write(output_path, {
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "error": error,
+                    "id": cmd_id,
+                })
 
-            atomic_write(output_path, {
-                "stdout": "".join(all_stdout),
-                "stderr": "".join(all_stderr),
-                "error": error,
-                "id": cmd_id,
-            })
-            with open(done_path, "w") as f:
-                f.write(cmd_id)
-        else:
-            # Single command execution
-            _executing = True
-            try:
-                stdout, stderr, error = run_code(code, namespace, max_output=args.max_output, label=cell_label)
-            finally:
-                _executing = False
-
-            append_history(session_dir, exec_index, code, stdout, stderr, error)
-            exec_index += 1
-
-            atomic_write(output_path, {
-                "stdout": stdout,
-                "stderr": stderr,
-                "error": error,
-                "id": cmd_id,
-            })
-
-            # Signal completion
-            with open(done_path, "w") as f:
-                f.write(cmd_id)
+                # Signal completion
+                with open(done_path, "w") as f:
+                    f.write(cmd_id)
+        finally:
+            # Stop the progress monitor and drop progress.json (the next
+            # command starts with a clean slate). Join unconditionally — the
+            # worker only writes small files to local /tmp and exits promptly
+            # once stop_event is set, so a zombie writer can never recreate
+            # progress.json after we remove it.
+            stop_progress.set()
+            if progress_thread is not None:
+                progress_thread.join()
+            for name in ("progress.json", "progress.json.tmp"):
+                try:
+                    os.remove(os.path.join(session_dir, name))
+                except OSError:
+                    pass
 
     cleanup(session_dir)
     print("pyreplab: shutdown", file=sys.stderr)

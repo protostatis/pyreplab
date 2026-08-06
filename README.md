@@ -30,7 +30,7 @@ print(df.head(20))
 Then run cells:
 
 ```bash
-pyreplab start --workdir /path/to/project   # start (auto-detects .venv/)
+pyreplab start --workdir /path/to/project   # start (auto-detects .venv/) — daemon detaches from the shell (nohup)
 pyreplab run analysis.py:0                  # Load data — stamps [0], [1], [2] into file
 pyreplab run analysis.py:1                  # Explore (df still loaded)
 pyreplab run analysis.py:2                  # Top rows (no reload)
@@ -76,12 +76,14 @@ python pyreplab.py [options]
   --venv PATH          Path to virtualenv directory itself (e.g. /project/.venv)
   --conda [ENV]        Activate conda env (default: base)
   --no-conda           Disable conda auto-detection
-  --timeout SECS       Per-command timeout (default: 30)
   --max-output CHARS   Hard cap on output size (default: 100000)
   --max-rows N         Pandas display rows (default: 50)
   --max-cols N         Pandas display columns (default: 20)
   --poll-interval SECS Poll interval (default: 0.05)
+  --progress-interval SECS Seconds between progress.json snapshots (default: 1.0, 0 disables)
 ```
+
+Note: the daemon has no server-side timeout — commands run to completion. The *client* gives up polling after `PYREPLAB_TIMEOUT` seconds (default 30) and returns exit code 2; `pyreplab wait` resumes polling.
 
 ## Working directory
 
@@ -97,7 +99,7 @@ When `--cwd` is explicitly set, the working directory is **sticky** — it stays
 
 ## Async execution
 
-Long-running commands return early instead of blocking. The client polls for up to `PYREPLAB_TIMEOUT` seconds (default: 115s, just under the typical 2-minute Bash tool timeout). If the command finishes in time, output is returned normally. If not:
+Long-running commands return early instead of blocking. The client polls for up to `PYREPLAB_TIMEOUT` seconds (default: 30s, configurable via env var). If the command finishes in time, output is returned normally. If not:
 
 ```bash
 export PYREPLAB_TIMEOUT=5
@@ -109,6 +111,18 @@ pyreplab wait
 # → done
 # exit code 0
 ```
+
+While a long command is executing, the daemon streams progress so you can see it's alive and how far it's gotten. During `run`/`wait` polling, a progress line is printed to stderr once per new snapshot (every ~1s), showing elapsed time, output volume, the active notebook cell, and the last line of output:
+
+```bash
+pyreplab run 'for i in range(10000):
+    print(f"iter {i}")'
+# → pyreplab: progress (3.0s) 710 chars out | last: iter 89
+# → pyreplab: progress (4.0s) 970 chars out | last: iter 119
+# → ... (final output on completion)
+```
+
+For commands that produce no output (long sleeps, silent computation), a heartbeat line appears every 10s so it's still clear the daemon is working. Disable progress display with `PYREPLAB_PROGRESS=0`; the daemon writes `progress.json` every `--progress-interval` seconds (default 1s, 0 disables).
 
 If you try to run a new command while one is still executing:
 ```bash
@@ -126,7 +140,7 @@ pyreplab cancel
 
 The cancel sends `SIGUSR1` to the daemon, which raises `KeyboardInterrupt` inside the running code. The session stays alive — only the current command is interrupted.
 
-When running a whole file (`pyreplab run file.py`), individual cells that exceed the timeout are automatically waited on before proceeding to the next cell, so all cells run to completion.
+When running a whole file (`pyreplab run file.py`), the daemon executes all cells sequentially in one server-side command; the client waits for the single combined result (which may take longer than `PYREPLAB_TIMEOUT` — use `wait` to resume polling, progress lines show the active cell).
 
 Short commands that finish within the timeout window work identically to before — no behavior change.
 
