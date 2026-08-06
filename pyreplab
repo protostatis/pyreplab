@@ -20,18 +20,29 @@
 set -euo pipefail
 
 PYREPLAB_BASE="${PYREPLAB_BASE:-/tmp/pyreplab}"
+# Resolve symlinks (uv tool installs symlink this script into ~/.local/bin)
+# so the real location inside the tool venv is found
+_self="$0"
+while [ -L "$_self" ]; do
+    _link="$(readlink "$_self")"
+    case "$_link" in
+        /*) _self="$_link" ;;
+        *) _self="$(cd "$(dirname "$_self")" && pwd)/$_link" ;;
+    esac
+done
+_self_dir="$(cd "$(dirname "$_self")" && pwd)"
 # Prefer the python next to this script (uv tool installs place both the
 # script and the venv python in bin/); fall back to PATH python3 for
 # repo/dev installs.
-if [ -x "$(cd "$(dirname "$0")" && pwd)/python" ]; then
-    PYREPLAB_PYTHON="$(cd "$(dirname "$0")" && pwd)/python"
+if [ -x "$_self_dir/python" ]; then
+    PYREPLAB_PYTHON="$_self_dir/python"
 else
     PYREPLAB_PYTHON="python3"
 fi
 if [ -n "${PYREPLAB_SCRIPT:-}" ]; then
     :
-elif [ -f "$(cd "$(dirname "$0")" && pwd)/pyreplab.py" ]; then
-    PYREPLAB_SCRIPT="$(cd "$(dirname "$0")" && pwd)/pyreplab.py"
+elif [ -f "$_self_dir/pyreplab.py" ]; then
+    PYREPLAB_SCRIPT="$_self_dir/pyreplab.py"
 else
     # uv tool installs put pyreplab.py in the venv's site-packages: the
     # venv's own python (adjacent to this script) can import it, while a
