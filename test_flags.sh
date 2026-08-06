@@ -248,10 +248,16 @@ printf 'home = %s\nversion = %s\ninclude-system-site-packages = false\nexecutabl
     "$base_bin" "$version" "$base_py" > "$fakevenv/pyvenv.cfg"
 pid=$(new_session "$BASE/envroot/sub" --venv "$fakevenv")
 [ -n "$pid" ] && check "same-binary venv session started" ok || check "same-binary venv session started" fail "no pid"
-out=$(cd "$BASE/envroot/sub" && "$PR" run 'import sys; print(sys.executable)')
-echo "$out" | grep -q "^$fakevenv/bin/python$" \
+out=$(cd "$BASE/envroot/sub" && "$PR" run 'import sys; print(sys.executable); print(sys.prefix); print(sys.base_prefix)')
+exec_py=$(printf '%s' "$out" | sed -n '1p')
+pref=$(printf '%s' "$out" | sed -n '2p')
+base=$(printf '%s' "$out" | sed -n '3p')
+[ "$exec_py" = "$fakevenv/bin/python" ] \
     && check "run executes under the venv python, not the launcher's python3" ok \
-    || check "run executes under the venv python, not the launcher's python3" fail "executable=$out"
+    || check "run executes under the venv python, not the launcher's python3" fail "executable=$exec_py"
+[ "$pref" = "$fakevenv" ] && [ "$pref" != "$base" ] \
+    && check "sys.prefix is the venv, sys.base_prefix is the base" ok \
+    || check "sys.prefix is the venv, sys.base_prefix is the base" fail "prefix=$pref base=$base"
 log="$(cd "$BASE/envroot/sub" && "$PR" dir)/daemon.log"
 grep -q "re-executing under" "$log" \
     && check "daemon re-executed into the same-binary venv" ok \

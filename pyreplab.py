@@ -257,8 +257,19 @@ def activate_venv(venv_path):
         print(f"pyreplab: no site-packages found in {venv_path}", file=sys.stderr)
         return False
 
-    for sp in site_dirs:
-        site.addsitedir(sp)
+    # If the current interpreter already bootstrapped this env (sys.prefix
+    # points at it — e.g. after re-exec into a real venv, whose site-packages
+    # CPython put on sys.path during startup), do not re-add them: that would
+    # process the venv's .pth hooks a second time. Only add them when running
+    # under a foreign interpreter.
+    already_bootstrapped = False
+    try:
+        already_bootstrapped = os.path.realpath(sys.prefix) == os.path.realpath(venv_path)
+    except OSError:
+        pass
+    if not already_bootstrapped:
+        for sp in site_dirs:
+            site.addsitedir(sp)
 
     # Set VIRTUAL_ENV so tools/subprocesses know we're in a venv
     os.environ["VIRTUAL_ENV"] = venv_path
@@ -341,7 +352,15 @@ def _reexec_under_env(env_path):
     - Non-venv env (conda/pixi dirs, fake venvs in tests, no pyvenv.cfg):
       sys.prefix never changes, so re-exec would loop forever; skip when the
       binary matches (re-exec only matters there for version consistency).
+
+    One-shot backstop: if a re-exec'd interpreter still does not identify the
+    env via sys.prefix (broken/stale pyvenv.cfg, wrapper script), don't execv
+    again — fail safe by running in place rather than looping forever.
     """
+    # os.execv replaces the process; this marker survives the exec and limits
+    # the whole daemon startup to a single re-exec.
+    if os.environ.get("PYREPLAB_REEXECED"):
+        return
     bin_dir = os.path.join(env_path, "bin")
     if not os.path.isdir(bin_dir):
         bin_dir = os.path.join(env_path, "Scripts")  # Windows
@@ -359,6 +378,7 @@ def _reexec_under_env(env_path):
         return
     if already_under_env:
         return
+    os.environ["PYREPLAB_REEXECED"] = "1"
     print(f"pyreplab: re-executing under {env_python}", file=sys.stderr)
     os.execv(env_python, [env_python] + sys.argv)
 
@@ -504,6 +524,10 @@ def main():
     session_dir = args.session_dir
     os.makedirs(session_dir, exist_ok=True)
 
+    # Directory the CLI was invoked from: relative --venv/PIXI paths must
+    # resolve against this, not against the pinned --cwd (chdir happens below).
+    startup_cwd = os.getcwd()
+
     # --cwd is sticky: chdir once at startup, skip per-command sync.
     # Without --cwd: follow the caller's shell directory on every run.
     cwd_locked = args.cwd is not None
@@ -518,6 +542,19 @@ def main():
     # or .pixi/envs/<name> (pixi) on the way to the session root > conda.
     venv_path = args.venv
     env_type = "venv"
+    if venv_path is not None and not os.path.isabs(venv_path):
+        # A relative --venv is resolved from where the CLI was invoked (the
+        # caller's directory), not from the pinned --cwd. Persist the resolved
+        # path in sys.argv: os.execv preserves argv but not cwd, and the
+        # re-exec'd daemon re-chdirs to --cwd before re-resolving args.
+        venv_path = os.path.join(startup_cwd, venv_path)
+        for _i, _a in enumerate(sys.argv):
+            if _a == "--venv" and _i + 1 < len(sys.argv):
+                sys.argv[_i + 1] = venv_path
+                break
+            if _a.startswith("--venv="):
+                sys.argv[_i] = "--venv=" + venv_path
+                break
     if venv_path is None:
         pixi_prefix = os.environ.get("PIXI_ENVIRONMENT_PREFIX", "")
         if pixi_prefix and os.path.isdir(pixi_prefix):
